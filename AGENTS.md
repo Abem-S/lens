@@ -62,6 +62,20 @@ Finding {
 }
 ```
 
+## Evaluation data
+
+| Source | What it covers | License / access | Use |
+|---|---|---|---|
+| **FERMAT** `ai4bharat/FERMAT` (Hugging Face, ACL 2025) | 2,244 handwritten math solutions (grades 7–12) with planted errors labelled for detection, localisation and correction; error types computational, conceptual, notational, presentation | CC BY 4.0; click-through agreement on Hugging Face | **Main scorecard** for catch rate and false alarms |
+| **EDU-CIRCUIT-HW** `gt-learning-innovation/CIRCUIT_EDU_HW_ACL` (GitHub, 2026) | 1,334 real undergraduate circuit-analysis solutions (with calculus, ODEs, physics) and expert transcriptions | No dataset license stated: private testing only, never redistributed | **Transcription accuracy** on university handwriting (A2) |
+| **Own set** under `eval/own/` | 10–15 pages of real university calculus, physics and chemistry work, shot on phone and webcam (tilt, shadows, a hand in frame), some with a planted mistake | Writers' consent required | **Camera conditions and subjects** the datasets lack; demo honesty |
+
+Rules:
+- External datasets are **downloaded at run time** into `.cache/eval/` (gitignored), never committed. The repo carries only the loaders and harness.
+- Own-set pages are committed only with each writer's consent; otherwise they live in the gitignored cache too.
+- Report scores **per source**; a FERMAT score is not a camera-photo score.
+- FERMAT and the own set measure error finding; EDU-CIRCUIT-HW measures reading only.
+
 ## Build order (DAG)
 
 Each node lists what it depends on and its **done** criterion. Nodes in different lanes with satisfied dependencies are built in parallel. Every node ships with a test that proves its done criterion.
@@ -85,8 +99,8 @@ A0 ─┬─ A1 ─┬─ A2 ── A3 ──┬── A5 ── A4 ──┐
 - **A1 Spark client** (A0). Text, image and audio inputs, streaming, `reasoning_effort` per call, retries, token/cost logging per call. *Done:* one call of each input type passes a test and logs its cost.
 - **A2 Page reader** (A1). Frame → `Page` (steps in order, LaTeX, bbox, problem if visible). *Done:* on 10 eval pages, every step is transcribed and boxed in the right order.
 - **A3 Step checker** (A2). For each consecutive pair, SymPy checks the step follows; non-algebraic steps go to Spark and are marked `verified_by: "model"`. Output: first erroneous step. *Done:* passes unit tests with planted algebra, calculus and sign errors, and marks correct derivations all `ok`.
-- **E0 Eval set** (no deps, starts day 1, runs alongside everything). 30–50 real handwritten solutions across calculus, physics and chemistry, each labelled with its first erroneous step or "none". Include phone and webcam photos, messy handwriting, bad lighting. *Done:* labelled set committed under `eval/` (only with the writers' consent).
-- **A5 Eval harness** (A3, E0). Runs reader + checker over the eval set; reports caught / missed / false alarms and cost per page. *Done:* one command prints the scorecard. **Gate:** false alarms ≤ 1 in 20 correct pages before A4 work is tuned further; the scorecard is a demo asset.
+- **E0 Eval sets** (no deps, starts day 1, runs alongside everything). Three sources, each covering a gap the others leave (see *Evaluation data* below). *Done:* a loader yields every item from all three as `(image, problem, first_error_step | "none")`, and the own set has its first 10 pages.
+- **A5 Eval harness** (A3, E0). Runs reader + checker over the eval sets; reports caught / missed / false alarms and cost per page, separately per source. *Done:* one command prints the scorecard. **Gate:** false alarms ≤ 1 in 20 correct pages before A4 work is tuned further; the scorecard is a demo asset.
 - **A4 Hint writer + guardrail** (A3). Writes one Socratic hint for a `Finding`; a second check rejects any hint that contains the corrected step, the result or an equivalent expression (SymPy compare against the expected next line), then regenerates. *Done:* across the eval errors, zero hints leak the answer.
 
 ### Lane C: SAM 3.1
