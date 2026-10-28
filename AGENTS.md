@@ -38,6 +38,8 @@ Muse Glimmer is out of scope: it adds nothing over Spark Open.
 - **Standalone architecture.** Lens runs as an independent, self-contained service.
 - **Hosting:** app on the owner's AWS Lightsail under a subdomain; GPU models on Modal (free $30/month tier covers dev + testing).
 
+- **Stack:** Vite + React + TypeScript frontend, FastAPI backend (Python, uv). Lens is a client-only camera app, so Vite fits better than Next.js; FastAPI serves the built frontend, so a deploy is one process. `make dev` runs both locally.
+
 ## Shared contract
 
 Every lane codes against this shape so lanes can build in parallel. Change it in one place: here.
@@ -120,3 +122,22 @@ A0 ─┬─ A1 ─┬─ A2 ── A3 ──┬── A5 ── A4 ──┐
 - **F2 Deploy** (F1). Production deploy on Modal (`make deploy-web`) + GPU services; access control configured. *Done:* an outside tester completes F1's session from their own device via the URL.
 - **F3 Real-student testing + cost** (F2). Several real students, own homework; measure cost per hour and error-catch rate in the wild; record consented clips. *Done:* cost/hour and scorecard numbers written down; at least one usable clip.
 
+### Build status
+
+Update this table when a node moves. "Built offline" means the code and its offline tests exist, but the done criterion needs a key, a GPU service or real photos.
+
+| Node | Status | What remains |
+|---|---|---|
+| A0 | Done | — |
+| A1 | Built offline (mocked HTTP: text, image, audio, streaming, retries, cost) | Run `tests/test_spark.py::test_live_each_input_type` with `BASETEN`; set `SPARK_PRICE_*` for cost |
+| A2 | Built offline (prompt, robust JSON parsing, retry) | Done criterion on 10 eval pages via `lens-eval` |
+| A3 | Done (SymPy checker; model judge only for lines SymPy cannot parse) | Tune on eval results |
+| A4 | Guardrail done; writer built offline (regenerates, safe fallback) | Zero-leak run across eval errors with `BASETEN` |
+| E0 | Loaders done (FERMAT, EDU-CIRCUIT-HW, own) | Own set: first 10 consented pages; FERMAT needs `HF_TOKEN` |
+| A5 | Harness done (`make eval`) | First real scorecard; false-alarm gate |
+| C1 | Not started | Needs Modal + `HF_TOKEN` |
+| C2 | Geometry done (fingertip, nearest step, outlines) | 10 real photos once C1 serves masks |
+| D1 | Done: webcam + phone QR pairing (~0.3 s locally), change detection; a new line triggered exactly one upload in a fake-camera browser run | Verify on a real phone over HTTPS |
+| D2 | Done: renders a recorded `Page` + `Finding` at laptop and phone widths (`/?demo`) | — |
+| V1, V2 | Not started | Need Modal |
+| F1–F3 | Not started | After the lanes converge |
