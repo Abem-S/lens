@@ -1,0 +1,50 @@
+[project]
+name = "lens"
+version = "0.1.0"
+description = "Muna Lens backend: reads handwritten STEM work, finds the first real mistake, asks a Socratic question"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "antlr4-python3-runtime==4.11",
+    "fastapi>=0.162.0",
+    "numpy>=2.5.4",
+    "openai>=3.40.0",
+    "pillow>=13.0.0",
+    "pydantic>=2.14.1",
+    "python-multipart>=0.0.32",
+    "sympy>=1.14.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "huggingface-hub>=2.3.0",
+    "pyarrow>=26.0.0",
+]
+
+[project.scripts]
+lens-eval = "lens.eval.harness:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+    "ruff>=0.17.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# SymPy and the parser raise many unrelated exception types; "cannot decide" is
+# the safe answer for all of them, so broad catches are deliberate here.
+# B008: FastAPI's File()/Form() defaults are the framework's idiom.
+ignore = ["BLE001", "S112", "B008", "TRY004"]
