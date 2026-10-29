@@ -108,24 +108,47 @@ def score_item(score: Score, item: EvalItem, page: Page, finding: Finding | None
 
 
 def run(items: Iterable[EvalItem], pipeline: Pipeline, cost: Callable[[], float | None] = lambda: None,
-        log: Callable[[str], None] = lambda s: None) -> dict[str, Score]:
+        log: Callable[[str], None] = lambda s: None, workers: int = 1,
+        record: Callable[[EvalItem, Page, Finding | None, str], None] | None = None) -> dict[str, Score]:
+    """Score every item. With workers > 1 pages run in parallel; cost is then
+    the total spend split evenly over pages."""
+    from concurrent.futures import ThreadPoolExecutor
+
     scores: dict[str, Score] = {}
-    for item in items:
-        score = scores.setdefault(item.source, Score(item.source))
-        before = cost()
+    items = list(items)
+    total_before = cost() if workers > 1 else None
+
+    def one(item: EvalItem):
         start = time.monotonic()
+        before = cost() if workers == 1 else None
         try:
             page, finding = pipeline(item.image, item.problem)
         except Exception as exc:  # one bad page must not stop the run
-            score.failures += 1
-            log(f"{item.source}/{item.id}: FAILED {type(exc).__name__}: {exc}")
-            continue
-        score.seconds += time.monotonic() - start
-        after = cost()
-        if score.cost_usd is not None:
-            score.cost_usd = None if before is None or after is None else score.cost_usd + (after - before)
-        outcome = score_item(score, item, page, finding)
-        log(f"{item.source}/{item.id}: {outcome}")
+            return item, None, None, time.monotonic() - start, exc, None
+        after = cost() if workers == 1 else None
+        spent = None if before is None or after is None else after - before
+        return item, page, finding, time.monotonic() - start, None, spent
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for item, page, finding, secs, exc, spent in pool.map(one, items):
+            score = scores.setdefault(item.source, Score(item.source))
+            if exc is not None:
+                score.failures += 1
+                log(f"{item.source}/{item.id}: FAILED {type(exc).__name__}: {exc}")
+                continue
+            score.seconds += secs
+            if workers == 1 and score.cost_usd is not None:
+                score.cost_usd = None if spent is None else score.cost_usd + spent
+            outcome = score_item(score, item, page, finding)
+            if record:
+                record(item, page, finding, outcome)
+            log(f"{item.source}/{item.id}: {outcome}")
+    if workers > 1:
+        total_after = cost()
+        n = sum(s.pages for s in scores.values())
+        for s in scores.values():
+            s.cost_usd = (None if total_before is None or total_after is None or not n
+                          else (total_after - total_before) * s.pages / n)
     return scores
 
 
@@ -140,20 +163,14 @@ def format_scorecard(scores: dict[str, Score]) -> str:
 
 
 def live_pipeline():
-    from lens.checker import check_page
     from lens.config import Settings
-    from lens.judge import spark_judge
-    from lens.reader import read_page
+    from lens.pipeline import check_image
     from lens.spark import SparkClient
 
     spark = SparkClient.from_settings(Settings.from_env())
-    judge = spark_judge(spark)
 
     def pipeline(image: bytes, problem: str | None):
-        page = read_page(spark, image, mime="image/png" if image[:4] == b"\x89PNG" else "image/jpeg")
-        if problem and not page.problem:
-            page.problem = problem
-        return check_page(page, judge)
+        return check_image(spark, image, problem, hint=False)
 
     return pipeline, lambda: spark.total_cost
 
@@ -164,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=20, help="items per source")
     ap.add_argument("--shards", type=int, default=1, help="FERMAT parquet shards to fetch (~480 MB each)")
     ap.add_argument("--json", action="store_true", help="print JSON instead of a table")
+    ap.add_argument("--balanced", action="store_true", help="FERMAT: half error pages, half clean, seeded sample")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--save", help="write per-page results (JSONL) here, e.g. .cache/eval/runs/x.jsonl")
     args = ap.parse_args(argv)
 
     import itertools
@@ -179,11 +200,29 @@ def main(argv: list[str] | None = None) -> int:
     items = []
     for src in sources:
         kw = {"shards": args.shards} if src == "fermat" else {}
+        if src == "fermat" and args.balanced:
+            from lens.eval.loaders import eval_cache, sample_fermat_ids
+
+            kw["ids"] = sample_fermat_ids(eval_cache(), args.limit, args.seed, args.shards)
         try:
             items.extend(itertools.islice(load(src, **kw), args.limit))
         except RuntimeError as exc:
             print(f"skip {src}: {exc}", file=sys.stderr)
-    scores = run(items, pipeline, cost, log=lambda s: print(s, file=sys.stderr))
+    out = open(args.save, "w") if args.save else None  # noqa: SIM115
+
+    def record(item, page, finding, outcome):
+        if out:
+            out.write(json.dumps({"source": item.source, "id": item.id, "label": item.first_error_step,
+                                  "outcome": outcome, "page": page.model_dump(),
+                                  "finding": finding.model_dump() if finding else None,
+                                  "meta": {k: v for k, v in item.meta.items() if isinstance(v, (str, int, float))}})
+                      + "\n")
+            out.flush()
+
+    scores = run(items, pipeline, cost, log=lambda s: print(s, file=sys.stderr), workers=args.workers,
+                 record=record)
+    if out:
+        out.close()
     print(json.dumps({k: v.summary() for k, v in scores.items()}, indent=2) if args.json
           else format_scorecard(scores))
     return 0

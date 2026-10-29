@@ -76,7 +76,24 @@ def fermat_shards(cache: Path, shards: int | None = None) -> list[Path]:
     ]
 
 
-def load_fermat(cache: Path | None = None, shards: int | None = None) -> Iterator[EvalItem]:
+def sample_fermat_ids(cache: Path, n: int, seed: int = 0, shards: int | None = None) -> set[str]:
+    """Pick n/2 pages with a planted error and n/2 clean pages, reproducibly."""
+    import random
+
+    import pyarrow.parquet as pq
+
+    rows = []
+    for shard in fermat_shards(cache, shards):
+        rows += pq.read_table(shard, columns=["new_custom_id", "has_error"]).to_pylist()
+    rng = random.Random(seed)
+    err = sorted(r["new_custom_id"] for r in rows if r["has_error"])
+    clean = sorted(r["new_custom_id"] for r in rows if not r["has_error"])
+    k = n // 2
+    return set(rng.sample(err, min(k, len(err))) + rng.sample(clean, min(n - k, len(clean))))
+
+
+def load_fermat(cache: Path | None = None, shards: int | None = None, ids: set[str] | None = None,
+                ) -> Iterator[EvalItem]:
     import pyarrow.parquet as pq
 
     cache = cache or eval_cache()
@@ -84,6 +101,8 @@ def load_fermat(cache: Path | None = None, shards: int | None = None) -> Iterato
         pf = pq.ParquetFile(shard)
         for batch in pf.iter_batches(batch_size=16):
             for row in batch.to_pylist():
+                if ids is not None and str(row.get("new_custom_id")) not in ids:
+                    continue
                 img = row["image"]
                 data = img["bytes"] if isinstance(img, dict) else img
                 has_error = bool(row.get("has_error"))
