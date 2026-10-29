@@ -22,8 +22,10 @@ from lens.mathparse import StepMath, analyse
 
 Verdict = Literal["ok", "error", "unknown"]
 
-# judge(previous_latex | None, current_latex, problem) -> ("ok" | "error" | "unknown", kind)
-ModelJudge = Callable[[str | None, str, str | None], tuple[Verdict, str]]
+# judge(page, candidate step ids) -> (id of the first wrong candidate | None, kind).
+# The judge sees the whole page for context but may only flag a candidate: a line
+# SymPy could not parse. It answers once per page.
+ModelJudge = Callable[[Page, list[str]], tuple[str | None, str]]
 
 _SAMPLES = 6
 _TOL = 1e-8
@@ -284,16 +286,26 @@ def check_pair(prev: StepMath | None, cur: StepMath) -> StepResult:
 def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Finding | None]:
     """Mark every step and return the first verified error, if any."""
     analysed = [analyse(s.latex) for s in page.steps]
+    results = [check_pair(analysed[i - 1] if i > 0 else None, cur) for i, cur in enumerate(analysed)]
+    first_sympy_error = next((i for i, r in enumerate(results) if r.verdict == "error"), len(results))
+
+    # Only lines SymPy cannot parse go to the model, and only those before the
+    # first SymPy-verified error (we report the first mistake only).
+    candidates = [page.steps[i].id for i in range(first_sympy_error) if analysed[i].kind == "unparseable"]
+    if judge is not None and candidates:
+        flagged, kind = judge(page, candidates)
+        flagged_at = next((i for i, s in enumerate(page.steps) if s.id == flagged and s.id in candidates), None)
+        for i, step in enumerate(page.steps):
+            if step.id not in candidates:
+                continue
+            if flagged_at is None or i < flagged_at:
+                results[i] = StepResult("ok", by="model")
+            elif i == flagged_at:
+                results[i] = StepResult("error", kind or "this step does not follow", "model")
+
     out: list[Step] = []
     finding: Finding | None = None
-    for i, (step, cur) in enumerate(zip(page.steps, analysed)):
-        prev = analysed[i - 1] if i > 0 else None
-        res = check_pair(prev, cur)
-        if cur.kind == "unparseable" and judge is not None:
-            # Only non-algebraic lines may be judged by the model.
-            prev_latex = page.steps[i - 1].latex if i > 0 else None
-            v, kind = judge(prev_latex, step.latex, page.problem)
-            res = StepResult(v, kind, "model")
+    for step, res in zip(page.steps, results):
         status = {"ok": "ok", "error": "error", "unknown": "unverifiable"}[res.verdict]
         verified_by = res.by if res.verdict != "unknown" else None
         out.append(step.model_copy(update={"status": status, "verified_by": verified_by}))

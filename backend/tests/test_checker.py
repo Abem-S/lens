@@ -91,21 +91,34 @@ def test_unparseable_lines_are_unverifiable_without_a_judge():
 def test_model_judges_only_lines_sympy_cannot_parse():
     calls = []
 
-    def judge(prev, cur, problem):
-        calls.append(cur)
-        return "error", "unit mismatch"
+    def judge(pg, candidates):
+        calls.append(candidates)
+        return candidates[0], "unit mismatch"
 
     checked, finding = check_page(page("2x = 6", "x = 3", "3\\,\\mathrm{kg} = 3000\\,\\mathrm{mg}"), judge)
-    assert calls == ["3\\,\\mathrm{kg} = 3000\\,\\mathrm{mg}"]
+    assert calls == [["s3"]]  # one call per page, only the unparseable line is a candidate
     assert finding is not None and finding.step_id == "s3"
     assert checked.steps[2].verified_by == "model"
     assert checked.steps[0].verified_by == "sympy"
 
 
-def test_model_cannot_overrule_sympy_on_algebra():
-    # The judge would call everything wrong; algebra lines never reach it.
-    _, finding = check_page(page("2x + 5 = 11", "2x = 6"), lambda *a: ("error", "nope"))
+def test_model_cannot_flag_an_algebra_line():
+    # The judge tries to flag a SymPy-checked line; it is ignored.
+    _, finding = check_page(page("2x + 5 = 11", "2x = 6", "\\text{so } x = 3"), lambda pg, c: ("s2", "nope"))
     assert finding is None
+
+
+def test_judge_is_not_asked_about_lines_after_a_sympy_error():
+    calls = []
+    check_page(page("2x + 5 = 11", "2x = 16", "\\text{so } x = 8"), lambda pg, c: calls.append(c) or (None, ""))
+    assert calls == []
+
+
+def test_lines_before_the_flagged_one_are_ok_by_model():
+    checked, finding = check_page(page("\\text{Let } v = 3", "\\text{then } 2v = 7", "\\text{so } v = 3.5"),
+                                  lambda pg, c: ("s2", "doubling error"))
+    assert [s.status for s in checked.steps] == ["ok", "error", "unverifiable"]
+    assert finding.step_id == "s2" and finding.kind == "doubling error"
 
 
 def test_lost_root_is_not_claimed_as_error():

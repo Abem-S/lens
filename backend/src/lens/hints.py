@@ -116,6 +116,13 @@ def leak_reason(hint: str, expected: Expected) -> str | None:
         return "a hint must be a question"
     if len(hint.split()) > MAX_WORDS:
         return "too long to speak"
+    return answer_leak(hint, expected)
+
+
+def answer_leak(text: str, expected: Expected) -> str | None:
+    """Content check shared by hints and spoken conversation replies: does this
+    text give away the result, a correct next line, or something equal to them?"""
+    hint = text
     if _REVEAL_PHRASES.search(hint):
         return "states what the answer should be"
 
