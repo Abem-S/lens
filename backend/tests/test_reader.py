@@ -56,3 +56,8 @@ def test_read_page_sends_image_with_big_budget_and_retries_bad_json():
     assert first_prompt[1]["type"] == "image_url"
     assert kw["max_tokens"] >= 3000
     assert len(spark.calls) == 2
+
+
+def test_corner_boxes_are_converted_to_xywh():
+    page = parse_page('{"steps": [{"latex": "x=1", "box": [0.1, 0.30, 0.6, 0.36]}]}')
+    assert page.steps[0].bbox == pytest.approx((0.1, 0.30, 0.5, 0.06))

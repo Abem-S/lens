@@ -14,11 +14,20 @@ from lens.spark import EmptyReply, SparkClient, audio_part, image_part, text_par
 
 
 def completion(text, p=10, c=20):
-    return {
-        "id": "x", "object": "chat.completion", "created": 0, "model": "m",
-        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}],
-        "usage": {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c},
-    }
+    """chat() streams under the hood, so the mock answers with server-sent events."""
+    def chunk(content=None, usage=None):
+        return {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [] if content is None else [{"index": 0, "delta": {"content": content},
+                                                         "finish_reason": None}],
+                "usage": usage}
+
+    events = ([chunk(text[:2]), chunk(text[2:])] if text else []) + [
+        chunk(usage={"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c})]
+    return "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+
+
+def sse_response(body):
+    return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
 
 
 def client_with(handler, **kw):
@@ -30,7 +39,7 @@ def test_text_call_sends_effort_and_logs_cost():
 
     def handler(req):
         seen.update(json.loads(req.content))
-        return httpx.Response(200, json=completion("hello", 1000, 2000))
+        return sse_response(completion("hello", 1000, 2000))
 
     c = client_with(handler, price_in=1.0, price_out=2.0)
     r = c.ask("hi", effort="minimal")
@@ -47,7 +56,7 @@ def test_image_and_audio_parts_are_data_urls():
 
     def handler(req):
         seen.update(json.loads(req.content))
-        return httpx.Response(200, json=completion("ok"))
+        return sse_response(completion("ok"))
 
     c = client_with(handler)
     c.ask([text_part("read"), image_part(b"\xff\xd8jpeg"), audio_part(b"RIFFwav")])
@@ -65,7 +74,7 @@ def test_retries_on_server_error_then_succeeds(monkeypatch):
         attempts["n"] += 1
         if attempts["n"] < 3:
             return httpx.Response(503, json={"error": "busy"})
-        return httpx.Response(200, json=completion("done"))
+        return sse_response(completion("done"))
 
     assert client_with(handler).ask("hi").text == "done"
     assert attempts["n"] == 3
@@ -73,7 +82,7 @@ def test_retries_on_server_error_then_succeeds(monkeypatch):
 
 def test_empty_reply_raises():
     with pytest.raises(EmptyReply):
-        client_with(lambda req: httpx.Response(200, json=completion(None))).ask("hi")
+        client_with(lambda req: sse_response(completion(None))).ask("hi")
 
 
 def test_streaming_yields_deltas_and_logs_usage():
@@ -123,3 +132,40 @@ def test_live_each_input_type():  # pragma: no cover - live
         w.writeframes(b"".join(struct.pack("<h", int(3000 * math.sin(i / 8))) for i in range(16000)))
     assert c.ask([text_part("Describe this audio."), audio_part(wav.getvalue())], effort="low").text
     assert all(call.prompt_tokens > 0 for call in c.calls)
+
+
+def test_slow_call_is_hedged_and_fast_copy_wins():
+    import threading
+    import time as _t
+
+    n = {"calls": 0}
+    lock = threading.Lock()
+
+    def handler(req):
+        with lock:
+            n["calls"] += 1
+            mine = n["calls"]
+        if mine == 1:
+            _t.sleep(1.0)  # the first copy is stuck in a queue
+        return sse_response(completion(f"copy{mine}"))
+
+    c = client_with(handler, price_in=1.0, price_out=1.0)
+    t = _t.monotonic()
+    r = c.chat([{"role": "user", "content": "hi"}], hedge_after=0.2)
+    assert r.text == "copy2" and _t.monotonic() - t < 0.9
+    _t.sleep(1.2)  # the slow copy finishes later and is still paid for
+    assert len(c.calls) == 2
+
+
+def test_hedge_survives_a_failing_copy(monkeypatch):
+    monkeypatch.setattr("lens.spark.time.sleep", lambda s: None)  # no retry backoff
+    n = {"calls": 0}
+
+    def handler(req):
+        n["calls"] += 1
+        if n["calls"] <= 4:  # first copy fails all its retries
+            return httpx.Response(500, json={"error": "boom"})
+        return sse_response(completion("ok"))
+
+    c = client_with(handler)
+    assert c.chat([{"role": "user", "content": "hi"}], hedge_after=5).text == "ok"

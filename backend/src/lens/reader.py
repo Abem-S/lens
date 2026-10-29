@@ -18,15 +18,16 @@ Reply with JSON only:
 {
   "problem": "the question being solved if it is written on the page, else null",
   "steps": [
-    {"latex": "one written line as LaTeX", "bbox": [x, y, w, h]}
+    {"latex": "one written line as LaTeX", "box": [left, top, right, bottom]}
   ]
 }
 
 Rules:
 - One entry per written line, in reading order. Do not merge or split lines.
 - If a line continues the previous one (starts with "="), keep the leading "=".
-- bbox is the line's box on the photo: x, y = top-left corner; w, h = size;
-  all as fractions of the image width and height (0 to 1).
+- box is the line's tight box on the photo: left, top, right, bottom edges as
+  fractions of the image width and height (0 to 1). A line's box is short:
+  about one line of handwriting tall.
 - Words go inside \\text{...}. Leave out crossed-out writing.
 - If nothing is written, return {"problem": null, "steps": []}."""
 
@@ -70,19 +71,55 @@ def parse_page(text: str) -> Page:
         latex = str(raw.get("latex", "")).strip() if isinstance(raw, dict) else ""
         if not latex:
             continue
-        steps.append(Step(id=f"s{len(steps) + 1}", latex=latex, bbox=_bbox(raw.get("bbox"))))
+        if raw.get("box") is not None:
+            l, t, r, b = _bbox(raw.get("box"))  # corners, same scaling rules
+            box = (min(l, r), min(t, b), abs(r - l), abs(b - t))
+        else:
+            box = _bbox(raw.get("bbox"))  # older x, y, w, h form
+        steps.append(Step(id=f"s{len(steps) + 1}", latex=latex, bbox=box))
     problem = data.get("problem")
     return Page(problem=str(problem) if problem else None, steps=steps)
 
 
+MAX_SIDE = 1600
+HEDGE_AFTER_S = 15.0
+
+
+def _hedge(spark) -> dict:
+    """Only the real client supports hedging; test fakes take plain keywords."""
+    from lens.spark import SparkClient
+
+    return {"hedge_after": HEDGE_AFTER_S} if isinstance(spark, SparkClient) else {}
+
+
+def shrink(image: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
+    """Big phone photos cost tokens and time without reading better; cap the long side."""
+    import io
+
+    from PIL import Image, ImageOps
+
+    try:
+        img = ImageOps.exif_transpose(Image.open(io.BytesIO(image)))
+    except Exception:
+        return image, "image/jpeg"
+    if max(img.size) <= max_side and img.format == "JPEG":
+        return image, "image/jpeg"
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=88)
+    return buf.getvalue(), "image/jpeg"
+
+
 def read_page(spark: Asks, image: bytes, mime: str = "image/jpeg", effort: str = "low") -> Page:
     """Call Spark once; retry once with a nudge if the reply is not valid JSON."""
+    image, mime = shrink(image)
     content = [text_part(READ_PROMPT), image_part(image, mime)]
-    reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page", json_mode=True)
+    reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page", json_mode=True,
+                      **_hedge(spark))
     try:
         return parse_page(reply.text)
     except ReadError:
         content.append(text_part("Your last reply was not valid JSON. Reply with the JSON object only."))
         reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page_retry",
-                          json_mode=True)
+                          json_mode=True, **_hedge(spark))
         return parse_page(reply.text)
