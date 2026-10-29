@@ -138,3 +138,22 @@ h1, h2 { margin: 0; }
   .lens-bar { padding: 10px 16px; }
   .page-view { max-height: none; }
 }
+
+/* ---------- tutor ---------- */
+.pointed { fill: rgba(44, 93, 143, 0.12); stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.tutor { display: grid; gap: 10px; padding: 12px; border-radius: 12px; background: var(--paper); border: 1px solid var(--line); }
+.tutor-head { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; }
+.tutor-state { font-weight: 600; }
+.tutor-latency { margin-left: auto; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.tutor-dot { width: 10px; height: 10px; border-radius: 50%; background: #b9b3a6; flex: none; }
+.tutor-listening { background: var(--ok); animation: breathe 1.6s ease-in-out infinite; }
+.tutor-speaking { background: var(--accent); animation: breathe 0.8s ease-in-out infinite; }
+.tutor-thinking, .tutor-reading { background: #d39b2a; animation: breathe 1s ease-in-out infinite; }
+.tutor-offline { background: var(--err); }
+@keyframes breathe { 50% { opacity: 0.35; } }
+.captions { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 0.95rem; line-height: 1.4; }
+.cap-you { color: var(--ink-soft); }
+.cap-you::before { content: "You: "; font-weight: 600; }
+.cap-lens::before { content: "Lens: "; font-weight: 600; color: var(--accent); }
+.talk { border: 1px solid var(--accent); color: var(--accent); background: transparent; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
+.talk-on { background: var(--accent); color: #fff; }

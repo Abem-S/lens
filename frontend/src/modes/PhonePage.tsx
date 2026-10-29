@@ -3,7 +3,7 @@ import { socketUrl } from "../lib/api";
 import { useCamera, useInterval, useWakeLock } from "../lib/camera";
 import { ChangeDetector, type Trigger } from "../lib/changeDetect";
 import { FrameSampler, grabJpeg } from "../lib/frames";
-import { STATE_LABEL } from "../lib/useChecker";
+import { STATE_LABEL } from "../lib/detectorLabels";
 
 /** Phone side: film the page, decide when it changed, stream frames to the laptop. */
 export function PhonePage({ sessionId }: { sessionId: string }) {

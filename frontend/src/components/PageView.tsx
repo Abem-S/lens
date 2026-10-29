@@ -6,6 +6,7 @@ interface Props {
   page: Page | null;
   finding: Finding | null;
   children: ReactNode; // the <video> or <img> of the page
+  pointingStep?: string | null; // the line the student is pointing at
 }
 
 function outlinePoints(finding: Finding, step: Step | undefined): string {
@@ -16,12 +17,17 @@ function outlinePoints(finding: Finding, step: Step | undefined): string {
 }
 
 /** The live page with the tutor's marks drawn on top, in frame coordinates. */
-export function PageView({ aspect, page, finding, children }: Props) {
+export function PageView({ aspect, page, finding, children, pointingStep }: Props) {
   const errorStep = finding ? page?.steps.find((s) => s.id === finding.step_id) : undefined;
+  const pointed = pointingStep ? page?.steps.find((s) => s.id === pointingStep) : undefined;
   return (
     <div className="page-view" style={{ aspectRatio: String(aspect) }}>
       <div className="page-media">{children}</div>
       <svg className="page-overlay" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+        {pointed && (
+          <rect className="pointed" data-testid="pointed-step" x={pointed.bbox[0] - 0.01} y={pointed.bbox[1] - 0.01}
+            width={pointed.bbox[2] + 0.02} height={pointed.bbox[3] + 0.02} rx="0.01" />
+        )}
         {finding && (
           <polygon className="outline" data-testid="finding-outline" points={outlinePoints(finding, errorStep)} />
         )}

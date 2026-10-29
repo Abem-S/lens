@@ -55,3 +55,36 @@ def test_unknown_session_is_refused():
     with pytest.raises(WebSocketDisconnect) as exc, c.websocket_connect("/ws/nope/phone") as ws:
         ws.receive_text()
     assert exc.value.code == 4404
+
+
+def test_tutor_socket_refuses_without_key():
+    c = TestClient(create_app(settings()))
+    with c.websocket_connect("/ws/tutor") as ws:
+        assert ws.receive_json()["type"] == "error"
+
+
+def test_tutor_socket_runs_a_check_and_speaks_the_hint(monkeypatch):
+    from lens.checker import check_page
+    from lens.contract import Page, Step
+
+    def fake_check(spark, image, problem, mask_for=None):
+        page = Page(problem="Solve 2x + 5 = 11", steps=[Step(id="s1", latex="2x + 5 = 11"),
+                                                         Step(id="s2", latex="2x = 16")])
+        page, finding = check_page(page)
+        return page, finding.model_copy(update={"hint": "What did you do with the 5?"})
+
+    monkeypatch.setattr("lens.pipeline.check_image", fake_check)
+    monkeypatch.setattr("lens.spark.SparkClient.from_settings", classmethod(lambda cls, s: object()))
+    c = TestClient(create_app(settings(baseten_key="k")))
+    with c.websocket_connect("/ws/tutor") as ws:
+        ws.send_json({"type": "hello", "voice": False, "opening": False})
+        ready = ws.receive_json()
+        assert ready["type"] == "ready" and ready["voice_available"] is False
+        ws.send_json({"type": "check", "reason": "new_ink"})
+        ws.send_bytes(b"jpeg")
+        seen = []
+        while not any(m.get("type") == "say" for m in seen):
+            seen.append(ws.receive_json())
+        result = next(m for m in seen if m["type"] == "result")
+        assert result["finding"]["step_id"] == "s2"
+        assert next(m for m in seen if m["type"] == "say")["text"] == "What did you do with the 5?"

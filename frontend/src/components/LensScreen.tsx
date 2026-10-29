@@ -13,10 +13,11 @@ interface Props {
   onCheck?: () => void;
   onExit?: () => void;
   extra?: ReactNode;
+  pointingStep?: string | null;
 }
 
 /** D2: live page, outline on the mistake, tutor pointer, steps panel. */
-export function LensScreen({ aspect, media, result, status, busy, error, onCheck, onExit, extra }: Props) {
+export function LensScreen({ aspect, media, result, status, busy, error, onCheck, onExit, extra, pointingStep }: Props) {
   const page = result?.page ?? null;
   const finding = result?.finding ?? null;
   const allOk = page && page.steps.length > 0 && !finding;
@@ -31,7 +32,7 @@ export function LensScreen({ aspect, media, result, status, busy, error, onCheck
         </span>
       </header>
       <main className="lens-main">
-        <PageView aspect={aspect} page={page} finding={finding}>
+        <PageView aspect={aspect} page={page} finding={finding} pointingStep={pointingStep}>
           {media}
         </PageView>
         <aside className="panel">
@@ -41,6 +42,7 @@ export function LensScreen({ aspect, media, result, status, busy, error, onCheck
               <p className="problem">{page.problem}</p>
             </section>
           )}
+          {extra}
           {finding && (
             <section className="hint" aria-live="polite">
               <h2>Lens asks</h2>
@@ -53,7 +55,6 @@ export function LensScreen({ aspect, media, result, status, busy, error, onCheck
             <h2>Lines</h2>
             <StepsPanel page={page} finding={finding} />
           </section>
-          {extra}
           {onCheck && (
             <button className="primary" onClick={onCheck} disabled={busy}>
               {busy ? "Reading…" : "Check my work"}

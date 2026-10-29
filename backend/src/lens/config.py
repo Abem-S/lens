@@ -36,6 +36,7 @@ class Settings:
     spark_price_out: float | None
     public_url: str | None  # where phones reach the app, e.g. https://lens.example.com
     cache_dir: Path
+    modal_configured: bool = False  # SAM + voice services on Modal
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -48,4 +49,6 @@ class Settings:
             spark_price_out=_float("SPARK_PRICE_OUT_PER_M"),
             public_url=os.environ.get("PUBLIC_URL") or None,
             cache_dir=Path(os.environ.get("LENS_CACHE_DIR", REPO_ROOT / ".cache")),
+            modal_configured=bool(os.environ.get("MODAL_TOKEN_ID") and os.environ.get("MODAL_TOKEN_SECRET"))
+            and os.environ.get("LENS_USE_MODAL", "1") != "0",
         )

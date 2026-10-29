@@ -1,9 +1,10 @@
 import QRCode from "qrcode";
 import { useEffect, useRef, useState } from "react";
 import { LensScreen } from "../components/LensScreen";
+import { TutorBar } from "../components/TutorBar";
 import { createSession, socketUrl } from "../lib/api";
 import type { Trigger } from "../lib/changeDetect";
-import { useChecker } from "../lib/useChecker";
+import { useTutor } from "../lib/useTutor";
 
 type Header = { type: "frame"; kind: "preview" | "check"; reason?: Trigger | "manual" };
 
@@ -18,7 +19,8 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
   const [phoneState, setPhoneState] = useState<string>("");
   const [setupError, setSetupError] = useState<string | null>(null);
   const ws = useRef<WebSocket | null>(null);
-  const checker = useChecker();
+  const lastFrame = useRef<Blob | null>(null);
+  const tutor = useTutor(async () => lastFrame.current);
 
   useEffect(() => {
     let closed = false;
@@ -47,7 +49,8 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
             return;
           }
           const blob = ev.data as Blob;
-          if (header?.kind === "check") checker.run(blob, header.reason ?? "manual");
+          lastFrame.current = blob;
+          if (header?.kind === "check") tutor.check(blob, header.reason ?? "manual");
           const url = URL.createObjectURL(blob);
           if (lastUrl) URL.revokeObjectURL(lastUrl);
           lastUrl = url;
@@ -93,12 +96,18 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
           <div className="media-empty">Waiting for the phone camera…</div>
         )
       }
-      result={checker.result}
-      status={checker.note ?? (phoneState || `Phone connected${pairedIn ? ` in ${pairedIn.toFixed(1)} s` : ""}`)}
-      busy={checker.busy}
-      error={checker.error}
+      result={tutor.result}
+      status={tutor.note ?? (phoneState || `Phone connected${pairedIn ? ` in ${pairedIn.toFixed(1)} s` : ""}`)}
+      busy={tutor.busy}
+      error={tutor.error}
       onCheck={() => ws.current?.send(JSON.stringify({ type: "capture" }))}
       onExit={onExit}
+      pointingStep={tutor.pointing?.step_id}
+      extra={
+        <TutorBar state={tutor.state} captions={tutor.captions} voiceOn={tutor.voiceOn}
+          voiceAvailable={tutor.voiceAvailable} latency={tutor.latency}
+          onStart={tutor.startVoice} onStop={tutor.stopVoice} />
+      }
     />
   );
 }

@@ -21,6 +21,9 @@ eval = [
     "huggingface-hub>=2.3.0",
     "pyarrow>=26.0.0",
 ]
+gpu = [
+    "modal[api-proxy-support]>=1.6.3",
+]
 
 [project.scripts]
 lens-eval = "lens.eval.harness:main"

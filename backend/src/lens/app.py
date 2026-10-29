@@ -5,6 +5,8 @@ Run from the repo root: `make dev` (or `make serve` for one process).
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import secrets
 import socket
@@ -47,12 +49,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sessions: dict[str, PairSession] = {}
     state: dict = {}
 
-    def pipeline():
+    def spark():
         if "spark" not in state:
             from lens.spark import SparkClient
 
             state["spark"] = SparkClient.from_settings(settings)
         return state["spark"]
+
+    def gpu(name: str):
+        """Modal clients, created on first use; None when Modal is not configured."""
+        if name not in state:
+            state[name] = None
+            if settings.modal_configured:
+                try:
+                    if name == "sam":
+                        from lens.sam import SamClient
+
+                        state[name] = SamClient()
+                    else:
+                        from lens.voice import VoiceClient
+
+                        state[name] = VoiceClient()
+                except Exception:
+                    log.exception("could not connect %s on Modal", name)
+        return state[name]
+
+    def mask_for(image: bytes, box):
+        sam = gpu("sam")
+        if sam is None:
+            return None
+        masks = sam.segment(image, boxes=[box], max_masks=1)
+        return masks[0].mask if masks else None
+
+    def check_image(image: bytes, problem: str | None):
+        from lens.pipeline import check_image as run
+
+        return run(spark(), image, problem, mask_for=mask_for)
+
+    def locate_fingertip(image: bytes):
+        from lens.pointing import fingertip_from_mask
+
+        sam = gpu("sam")
+        if sam is None:
+            return None
+        masks = sam.segment(image, text="fingertip", max_masks=1) or sam.segment(image, text="index finger",
+                                                                                  max_masks=1)
+        return fingertip_from_mask(masks[0].mask) if masks else None
 
     def prune() -> None:
         now = time.time()
@@ -134,24 +176,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(413, "image too large")
 
         def work():
-            from lens.checker import check_page
-            from lens.hints import write_hint
-            from lens.judge import spark_judge
-            from lens.pointing import outline_for_step
-            from lens.reader import read_page
-
-            spark = pipeline()
-            page = read_page(spark, data, mime=image.content_type or "image/jpeg")
-            if problem and not page.problem:
-                page.problem = problem
-            page, finding = check_page(page, spark_judge(spark))
-            if finding:
-                hint, _ = write_hint(spark, page, finding)
-                step = page.step(finding.step_id)
-                finding = finding.model_copy(update={"hint": hint, "mask": outline_for_step(step)})
+            page, finding = check_image(data, problem)
             return {"page": page.model_dump(), "finding": finding.model_dump() if finding else None}
 
         return await run_in_threadpool(work)
+
+    @app.websocket("/ws/tutor")
+    async def tutor(ws: WebSocket):
+        """F1 + V2: one tutor session per Lens screen (protocol in lens/tutor.py)."""
+        from lens.tutor import Services, TutorSession
+
+        await ws.accept()
+        if not settings.baseten_key:
+            await ws.send_json({"type": "error", "message": "BASETEN is not set: the tutor is off"})
+            await ws.close()
+            return
+        voice = gpu("voice")
+        services = Services(brain=spark(), speech=voice, check=check_image,
+                            locate_fingertip=locate_fingertip if settings.modal_configured else None)
+        session = TutorSession(services, ws.send_json, ws.send_bytes)
+        warm = [c for c in (voice, gpu("sam")) if c is not None]
+        for c in warm:  # keep GPU containers up while a student is here (cold start ~1 min)
+            await run_in_threadpool(c.keep_warm, True)
+        pending: dict | None = None
+        opened = False
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if msg.get("text") is not None:
+                    data = json.loads(msg["text"])
+                    kind = data.get("type")
+                    if kind == "hello":
+                        session.voice = bool(data.get("voice", True)) and voice is not None
+                        await ws.send_json({"type": "ready", "voice": session.voice, "voice_available": voice is not None,
+                                            "pointing": services.locate_fingertip is not None})
+                        if data.get("opening", True):
+                            opened = True
+                            await session.start()
+                    elif kind == "voice":
+                        session.voice = bool(data.get("on")) and voice is not None
+                        if session.voice and not opened:
+                            opened = True
+                            await session.start()  # proactive: Lens speaks first
+                        elif not session.voice:
+                            await session.on_interrupt()
+                    elif kind == "interrupt":
+                        await session.on_interrupt()
+                    elif kind in ("frame", "utterance", "check"):
+                        pending = data  # its binary payload comes next
+                elif msg.get("bytes") is not None and pending is not None:
+                    payload, kind = msg["bytes"], pending["type"]
+                    if len(payload) <= MAX_FRAME_BYTES:
+                        if kind == "frame":
+                            await session.on_frame(payload)
+                        elif kind == "utterance":
+                            await session.on_utterance(payload)
+                        elif kind == "check":
+                            asyncio.create_task(session.on_check(payload, pending.get("reason", "manual")))
+                    pending = None
+        except WebSocketDisconnect:
+            pass
+        finally:
+            await session.close()
+            for c in warm:
+                await run_in_threadpool(c.keep_warm, False)
 
     dist = REPO_ROOT / "frontend" / "dist"
     if dist.is_dir():
