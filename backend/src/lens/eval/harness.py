@@ -74,6 +74,9 @@ class Score:
 def _plain(text: str) -> str:
     """Rough normalisation so LaTeX and markdown transcriptions compare fairly."""
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)  # markdown image links
+    # Expert references describe drawings in blockquotes ("> A circuit diagram..."); Lens
+    # transcribes working, not pictures, so those descriptions are not compared.
+    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
     text = re.sub(r"\\boxed\{([^{}]*)\}", r"\1", text)
     text = re.sub(r"\\(text|mathrm|mathbf)\{([^}]*)\}", r"\2", text)
     text = re.sub(r"\\[a-zA-Z]+|[$#*`{}\\]|\s+", "", text)
@@ -81,7 +84,9 @@ def _plain(text: str) -> str:
 
 
 def reading_similarity(page: Page, reference: str) -> float:
-    return difflib.SequenceMatcher(None, _plain(" ".join(s.latex for s in page.steps)), _plain(reference)).ratio()
+    # autojunk off: on long strings it discards frequent characters and sinks the score
+    return difflib.SequenceMatcher(None, _plain(" ".join(s.latex for s in page.steps)), _plain(reference),
+                                   autojunk=False).ratio()
 
 
 def score_item(score: Score, item: EvalItem, page: Page, finding: Finding | None) -> str:
