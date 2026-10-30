@@ -73,6 +73,8 @@ class Score:
 
 def _plain(text: str) -> str:
     """Rough normalisation so LaTeX and markdown transcriptions compare fairly."""
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)  # markdown image links
+    text = re.sub(r"\\boxed\{([^{}]*)\}", r"\1", text)
     text = re.sub(r"\\(text|mathrm|mathbf)\{([^}]*)\}", r"\2", text)
     text = re.sub(r"\\[a-zA-Z]+|[$#*`{}\\]|\s+", "", text)
     return text.lower()
@@ -162,14 +164,17 @@ def format_scorecard(scores: dict[str, Score]) -> str:
     return "\n".join([line(cols), line(["-" * w for w in widths]), *(line(r) for r in rows)])
 
 
-def live_pipeline():
+def live_pipeline(read_only: bool = False):
     from lens.config import Settings
     from lens.pipeline import check_image
+    from lens.reader import read_page
     from lens.spark import SparkClient
 
     spark = SparkClient.from_settings(Settings.from_env())
 
     def pipeline(image: bytes, problem: str | None):
+        if read_only:  # reading-only sources (EDU-CIRCUIT-HW) have no error labels
+            return read_page(spark, image), None
         return check_image(spark, image, problem, hint=False)
 
     return pipeline, lambda: spark.total_cost
@@ -193,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING)
     try:
         pipeline, cost = live_pipeline()
+        reader, reader_cost = live_pipeline(read_only=True)
     except RuntimeError as exc:
         print(f"lens-eval: {exc}", file=sys.stderr)
         return 2
@@ -200,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
     items = []
     for src in sources:
         kw = {"shards": args.shards} if src == "fermat" else {}
+        if src == "edu_circuit":
+            from lens.eval.loaders import eval_cache, fetch_edu_circuit_sample
+
+            if not (eval_cache() / "edu_circuit").is_dir():
+                fetch_edu_circuit_sample(args.limit)
         if src == "fermat" and args.balanced:
             from lens.eval.loaders import eval_cache, sample_fermat_ids
 
@@ -219,8 +230,11 @@ def main(argv: list[str] | None = None) -> int:
                       + "\n")
             out.flush()
 
-    scores = run(items, pipeline, cost, log=lambda s: print(s, file=sys.stderr), workers=args.workers,
-                 record=record)
+    log = lambda s: print(s, file=sys.stderr)
+    scores = run([i for i in items if i.first_error_step is not None], pipeline, cost, log=log,
+                 workers=args.workers, record=record)
+    scores.update(run([i for i in items if i.first_error_step is None], reader, reader_cost, log=log,
+                      workers=args.workers, record=record))
     if out:
         out.close()
     print(json.dumps({k: v.summary() for k, v in scores.items()}, indent=2) if args.json

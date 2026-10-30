@@ -9,6 +9,7 @@ Datasets are fetched at run time into .cache/eval/ (gitignored) and never commit
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -183,3 +184,79 @@ def load_own(labels: Path = OWN_DIR / "labels.json", cache: Path | None = None) 
 
 def load(source: Source, **kw) -> Iterator[EvalItem]:
     return {"fermat": load_fermat, "edu_circuit": load_edu_circuit, "own": load_own}[source](**kw)
+
+
+EDU_CIRCUIT_ZIP = "https://repository.gatech.edu/server/api/core/bitstreams/09496897-10b3-4675-bcf5-73b5b9802cd2/content"
+
+
+class _HttpRangeFile(io.RawIOBase):
+    """Read-only, seekable view of a remote file through HTTP range requests,
+    so zipfile can pull a few members out of a 9 GB archive."""
+
+    def __init__(self, url: str, block: int = 1 << 20):
+        import httpx
+
+        self.url, self.block, self.pos = url, block, 0
+        self.client = httpx.Client(follow_redirects=True, timeout=120)
+        head = self.client.get(url, headers={"Range": "bytes=0-0"})
+        self.size = int(head.headers["content-range"].split("/")[-1])
+        self.cache: dict[int, bytes] = {}
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.pos
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        self.pos = {0: offset, 1: self.pos + offset, 2: self.size + offset}[whence]
+        return self.pos
+
+    def _block(self, i: int) -> bytes:
+        if i not in self.cache:
+            start = i * self.block
+            end = min(self.size, start + self.block) - 1
+            self.cache[i] = self.client.get(self.url, headers={"Range": f"bytes={start}-{end}"}).content
+            if len(self.cache) > 64:
+                self.cache.pop(next(iter(self.cache)))
+        return self.cache[i]
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            n = self.size - self.pos
+        out = bytearray()
+        while n > 0 and self.pos < self.size:
+            i, off = divmod(self.pos, self.block)
+            chunk = self._block(i)[off: off + n]
+            out += chunk
+            self.pos += len(chunk)
+            n -= len(chunk)
+        return bytes(out)
+
+    def readinto(self, b) -> int:
+        data = self.read(len(b))
+        b[: len(data)] = data
+        return len(data)
+
+
+def fetch_edu_circuit_sample(n: int = 15, seed: int = 0, cache: Path | None = None) -> Path:
+    """Extract n expert-rectified (image, transcript) pairs from the release zip
+    without downloading all of it. Private testing only; never committed."""
+    import random
+    import zipfile
+
+    root = (cache or eval_cache()) / "edu_circuit"
+    zf = zipfile.ZipFile(_HttpRangeFile(EDU_CIRCUIT_ZIP))
+    names = set(zf.namelist())
+    md = sorted(x for x in names if "Rectified_recognized_markdown_done_Anon/Final_4_LLM_judge/" in x
+                and x.endswith("_markdown.md") and x.replace("_markdown.md", "_source.png") in names)
+    for name in random.Random(seed).sample(md, min(n, len(md))):
+        for member in (name, name.replace("_markdown.md", "_source.png")):
+            target = root / member
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(member))
+    return root
