@@ -131,15 +131,20 @@ Update this table when a node moves. "Built offline" means the code and its offl
 | Node | Status | What remains |
 |---|---|---|
 | A0 | Done | — |
-| A1 | Built offline (mocked HTTP: text, image, audio, streaming, retries, cost) | Run `tests/test_spark.py::test_live_each_input_type` with `BASETEN`; set `SPARK_PRICE_*` for cost |
-| A2 | Built offline (prompt, robust JSON parsing, retry) | Done criterion on 10 eval pages via `lens-eval` |
-| A3 | Done (SymPy checker; model judge only for lines SymPy cannot parse) | Tune on eval results |
-| A4 | Guardrail done; writer built offline (regenerates, safe fallback) | Zero-leak run across eval errors with `BASETEN` |
-| E0 | Loaders done (FERMAT, EDU-CIRCUIT-HW, own) | Own set: first 10 consented pages; FERMAT needs `HF_TOKEN` |
-| A5 | Harness done (`make eval`) | First real scorecard; false-alarm gate |
-| C1 | Not started | Needs Modal + `HF_TOKEN` |
-| C2 | Geometry done (fingertip, nearest step, outlines) | 10 real photos once C1 serves masks |
+| A1 | Done: live text, image and audio calls pass and log cost. Every call streams under the hood; slow image calls are hedged | Confirm Baseten's price (using 1.25 / 4.25 USD per M tokens from a third-party listing) |
+| A2 | Measured: reading 15 real EDU-CIRCUIT-HW pages scores a median 0.93 similarity to expert transcriptions (mean 0.82; low scores are diagram-heavy pages). Boxes are asked as corners | A few pages read at 0.56–0.76; "every step on 10 pages" not yet met strictly |
+| A3 | Done: SymPy checker (+ arithmetic inside wordy lines), whole-page model judge with a confirmation pass, re-read before a SymPy claim | Tune on more eval results |
+| A4 | Done: 20 planted mistakes, hints at `low` effort, independent high-effort audit flagged 0 leaks | Make the more generic hints more specific |
+| E0 | Loaders done; FERMAT downloaded; EDU-CIRCUIT-HW sample fetched by range requests | Own set: first 10 consented pages |
+| A5 | Done: `make eval`. FERMAT (40 balanced pages): catch rate 9/18, false alarms 1/20 (gate passed, at the limit), $0.032 and 88 s per page | Re-run after the newest checker changes; more pages for tighter numbers |
+| C1 | Done: SAM 3 on Modal; masks for 11/11 reader step boxes, fingertip on 8/8 hand photos, 0.15 s warm, ~80 s cold | — |
+| C2 | Geometry done; pointing uses the hand mask (+ a held pen); right line picked in the live F1 session | 10 real photos of a finger on a line |
 | D1 | Done: webcam + phone QR pairing (~0.3 s locally), change detection; a new line triggered exactly one upload in a fake-camera browser run | Verify on a real phone over HTTPS |
 | D2 | Done: renders a recorded `Page` + `Finding` at laptop and phone widths (`/?demo`) | — |
-| V1, V2 | Not started | Need Modal |
-| F1–F3 | Not started | After the lanes converge |
+| V1 | Done: ASR 0.22–0.35 s for a 4.7 s utterance (exact transcript); TTS first audio ~0.25 s | — |
+| V2 | Done: first audio 1.4–1.8 s after a spoken question (warm); barge-in stops speech; also verified in a browser with a fake mic | Real-mic test |
+| F1 | Done: live session — correct line silent, wrong line outlined + spoken question, "is this line right?" with pointing, fix acknowledged; nothing spoken leaks the answer | Same on real handwriting with a real camera |
+| F2 | Prepared: `deploy/setup-lightsail.sh` (systemd + Caddy HTTPS), optional `LENS_ACCESS_CODE` tester gate | Run on the Lightsail instance; login choice |
+| F3 | Not started | Real students, after F2 |
+
+Known issue: image calls on the shared Baseten endpoint sometimes queue 20–200 s (text replies stay ~1 s). Page reads are slow until that improves; a dedicated deployment is the likely fix.
