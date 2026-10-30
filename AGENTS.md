@@ -38,6 +38,8 @@ Muse Glimmer is out of scope: it adds nothing over Spark Open.
 - **Standalone architecture.** Lens runs as an independent, self-contained service.
 - **Hosting:** app on the owner's AWS Lightsail under a subdomain; GPU models on Modal (free $30/month tier covers dev + testing).
 
+- **Voice transport:** hand-built, no LiveKit. Browser loudness VAD cuts utterances and detects barge-in; WAV over the `/ws/tutor` WebSocket → Omnilingual ASR → Spark (`minimal`, streamed) → Kokoro sentence by sentence → PCM back. One less service to run; measured 1.4–1.8 s to first audio on a warm system.
+- **SAM for still frames:** `facebook/sam3` through Transformers (the listed backup). The SAM 3.1 checkpoint only loads in Meta's own package, and its gain (Object Multiplex) is faster multi-object *video* tracking, which still frames do not use. Revisit if Lens moves to video tracking.
 - **Stack:** Vite + React + TypeScript frontend, FastAPI backend (Python, uv). Lens is a client-only camera app, so Vite fits better than Next.js; FastAPI serves the built frontend, so a deploy is one process. `make dev` runs both locally.
 
 ## Shared contract
