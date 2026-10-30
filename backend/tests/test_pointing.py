@@ -76,3 +76,22 @@ def test_mask_outline_and_fallback():
     assert min(xs) == pytest.approx(0.2) and max(xs) == pytest.approx(0.8)
     assert min(ys) == pytest.approx(0.2) and max(ys) == pytest.approx(0.3)
     assert outline_for_step(LINES[0], np.zeros((5, 5), bool)) == bbox_outline(LINES[0].bbox)
+
+
+def test_pointer_tip_uses_the_hand_and_extends_along_a_held_pen():
+    from lens.pointing import pointer_tip
+
+    hand = finger(tip=(300, 250), from_edge="bottom", width=60)
+    pen = np.zeros_like(hand)
+    pen[180:252, 296:304] = True  # pen sticking up out of the hand
+    stray_pen = np.zeros_like(hand)
+    stray_pen[10:40, 500:510] = True  # a pen lying on the desk elsewhere
+
+    def seg(masks):
+        return lambda image, text: masks.get(text, [])
+
+    _, y = pointer_tip(seg({"hand": [hand], "pen": [pen]}), b"img")
+    assert abs(y * 400 - 180) <= 3  # the pen tip, not the knuckles
+    _, y = pointer_tip(seg({"hand": [hand], "pen": [stray_pen]}), b"img")
+    assert abs(y * 400 - 250) <= 3  # a pen not in the hand is ignored
+    assert pointer_tip(seg({}), b"img") is None

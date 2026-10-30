@@ -118,3 +118,26 @@ def outline_for_step(step: Step, mask: np.ndarray | None = None) -> Polygon:
         if poly and len(poly) >= 3:
             return poly
     return bbox_outline(step.bbox)
+
+
+def pointer_tip(segment, image: bytes) -> tuple[float, float] | None:
+    """Where the student points, from SAM: segment(image, text) -> list of masks, best first.
+
+    The hand is the most reliable prompt ("fingertip" sometimes picks the thumb);
+    its far end from where it enters the frame is the fingertip. A pen held in that
+    hand extends the pointer, so a touching pen mask is joined to the hand first.
+    """
+    hands = segment(image, "hand")
+    if not hands:
+        fingers = segment(image, "index finger")
+        return fingertip_from_mask(fingers[0]) if fingers else None
+    pointer = np.asarray(hands[0], dtype=bool)
+    for pen in segment(image, "pen")[:1]:
+        pen = np.asarray(pen, dtype=bool)
+        grown = pointer.copy()
+        for axis in (0, 1):  # grow the hand a few pixels to test contact
+            for shift in (-3, 3):
+                grown |= np.roll(pointer, shift, axis=axis)
+        if (grown & pen).any():
+            pointer = pointer | pen
+    return fingertip_from_mask(pointer)

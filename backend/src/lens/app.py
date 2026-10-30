@@ -87,14 +87,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return run(spark(), image, problem, mask_for=mask_for)
 
     def locate_fingertip(image: bytes):
-        from lens.pointing import fingertip_from_mask
+        from lens.pointing import pointer_tip
 
         sam = gpu("sam")
         if sam is None:
             return None
-        masks = sam.segment(image, text="fingertip", max_masks=1) or sam.segment(image, text="index finger",
-                                                                                  max_masks=1)
-        return fingertip_from_mask(masks[0].mask) if masks else None
+        return pointer_tip(lambda img, text: [m.mask for m in sam.segment(img, text=text, max_masks=1)], image)
 
     def prune() -> None:
         now = time.time()
