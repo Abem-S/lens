@@ -13,12 +13,13 @@ import cmath
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal
 
 import sympy as sp
 
 from lens.contract import Finding, Page, Step
-from lens.mathparse import StepMath, analyse
+from lens.mathparse import StepMath, analyse, numeric_sides
 
 Verdict = Literal["ok", "error", "unknown"]
 
@@ -287,6 +288,12 @@ def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Findi
     """Mark every step and return the first verified error, if any."""
     analysed = [analyse(s.latex) for s in page.steps]
     results = [check_pair(analysed[i - 1] if i > 0 else None, cur) for i, cur in enumerate(analysed)]
+    # Wordy lines can still hold plain arithmetic ("so the total is 8 x 2.5 = 18 kg"):
+    # SymPy checks that part, and only a mismatch counts (a match proves nothing else).
+    for i, cur in enumerate(analysed):
+        nums = numeric_sides(page.steps[i].latex) if cur.kind == "unparseable" else None
+        if nums and any(equivalent(a, b) is False for a, b in pairwise(nums)):
+            results[i] = StepResult("error", "arithmetic: the two sides are not equal", "sympy")
     first_sympy_error = next((i for i, r in enumerate(results) if r.verdict == "error"), len(results))
 
     # Only lines SymPy cannot parse go to the model, and only those before the

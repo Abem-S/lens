@@ -25,7 +25,7 @@ Content = str | list[dict[str, Any]]
 
 # Reasoning tokens count against max_tokens; too small a budget returns None.
 REPLY_MAX_TOKENS = 1500
-PAGE_MAX_TOKENS = 3000
+PAGE_MAX_TOKENS = 6000
 _RETRYABLE = (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError, httpx.RemoteProtocolError,
               httpx.ReadError)
 

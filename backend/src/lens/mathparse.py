@@ -168,3 +168,42 @@ def analyse(latex: str) -> StepMath:
     if kind == "equation":
         sm.variants = [(sides[0], sides[1])]
     return sm
+
+
+_TEXT_GROUP = re.compile(r"\\(text|mathrm|textbf|mbox|operatorname)\s*\{([^{}]*)\}(\s*\^\s*(\{[^{}]*\}|\d))?")
+_DEGREE = re.compile(r"\^\s*\{?\s*\\circ\s*\}?|\\degree")
+_PERCENT = re.compile(r"\\%")
+
+
+def numeric_sides(latex: str) -> list[sp.Expr] | None:
+    """Pull plain arithmetic out of a wordy line, for a SymPy check.
+
+    "Total weight = (8 \\times 2.5)\\,\\text{kg} = 18\\,\\text{kg}" -> [20, 18].
+    Words and units (with their exponents) are dropped, but only sides that carry
+    the same unit are compared, so a conversion like 3 kg = 3000 g is never read
+    as 3 = 3000. None unless at least two numeric sides are found.
+    """
+    s = _clean(latex)
+    if _INEQUALITY.search(s) or "\\pm" in s:
+        return None
+    out: list[sp.Expr] = []
+    units: set[str] = set()
+    for part in _split_top_level(s):
+        unit = " ".join(m.group(2).strip() + (m.group(3) or "").replace(" ", "") for m in _TEXT_GROUP.finditer(part))
+        if _DEGREE.search(part):
+            unit += " deg"
+        if _PERCENT.search(part):
+            unit += " %"
+        body = _PERCENT.sub(" ", _DEGREE.sub(" ", _TEXT_GROUP.sub(" ", part))).strip().strip(",;:").strip()
+        if not body or re.search(r"[A-Za-z]", re.sub(r"\\(frac|dfrac|times|cdot|div|sqrt|left|right)", "", body)):
+            continue  # a word or a variable is left: not plain arithmetic
+        try:
+            v = _fix_symbols(parse_latex(body))
+        except Exception:
+            continue
+        if isinstance(v, sp.Expr) and not v.free_symbols and v.is_number:
+            out.append(v)
+            units.add(unit.strip())
+    if len(units) > 1:
+        return None  # different units on different sides: a conversion, not arithmetic
+    return out if len(out) >= 2 else None

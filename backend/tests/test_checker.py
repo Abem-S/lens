@@ -126,3 +126,23 @@ def test_lost_root_is_not_claimed_as_error():
     checked, finding = check_page(page("x^2 = 9", "x = 3"))
     assert finding is None
     assert checked.steps[1].status == "unverifiable"
+
+
+@pytest.mark.parametrize("line,wrong", [
+    ("\\text{Total weight increased} = (8 \\times 2.5) \\text{kg} = 18 \\text{kg}", True),
+    ("\\text{Thus,} \\theta = \\frac{2}{3} \\times 360^{\\circ} = 250^{\\circ}", True),
+    ("\\text{Thus,} \\theta = \\frac{2}{3} \\times 360^{\\circ} = 240^{\\circ}", False),
+    ("\\text{Area} = 3 \\times 4 = 12 \\, \\text{cm}^2", False),
+    ("\\text{so } x = 2 \\text{ and } y = 3", False),  # no arithmetic chain: left to the model
+    ("\\text{Answer: Option C}", False),
+    ("3 \\, \\text{kg} = 3000 \\, \\text{g}", False),  # a unit conversion, not 3 = 3000
+    ("\\text{Speed} = \\frac{100}{4} \\text{m/s} = 20 \\text{m/s}", True),
+    ("\\text{Discount} = 20\\% \\text{ of } 50 = 10", False),  # mixed: % on one side only
+])
+def test_arithmetic_inside_words_is_checked_by_sympy(line, wrong):
+    checked, finding = check_page(page(line))
+    if wrong:
+        assert finding is not None and checked.steps[0].verified_by == "sympy"
+        assert "arithmetic" in finding.kind
+    else:
+        assert finding is None
