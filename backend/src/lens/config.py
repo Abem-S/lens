@@ -37,6 +37,7 @@ class Settings:
     public_url: str | None  # where phones reach the app, e.g. https://lens.example.com
     cache_dir: Path
     modal_configured: bool = False  # SAM + voice services on Modal
+    access_code: str | None = None  # tester gate; None = open
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -51,4 +52,5 @@ class Settings:
             cache_dir=Path(os.environ.get("LENS_CACHE_DIR", REPO_ROOT / ".cache")),
             modal_configured=bool(os.environ.get("MODAL_TOKEN_ID") and os.environ.get("MODAL_TOKEN_SECRET"))
             and os.environ.get("LENS_USE_MODAL", "1") != "0",
+            access_code=os.environ.get("LENS_ACCESS_CODE") or None,
         )

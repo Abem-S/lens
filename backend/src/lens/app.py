@@ -115,7 +115,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ip = lan_ip()
             if ip:
                 base = base.replace("localhost", ip).replace("127.0.0.1", ip)
-        return {"id": sid, "phone_url": f"{base.rstrip('/')}/phone/{sid}"}
+        url = f"{base.rstrip('/')}/phone/{sid}"
+        if settings.access_code:  # the phone gets in by scanning the code
+            url += f"?code={settings.access_code}"
+        return {"id": sid, "phone_url": url}
 
     @app.get("/api/sessions/{sid}")
     def session_status(sid: str):
@@ -253,4 +256,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return FileResponse(Path(dist / "index.html"))
 
     app.state.sessions = sessions
+    if settings.access_code:
+        from lens.access import AccessGate
+
+        app.add_middleware(AccessGate, code=settings.access_code)
     return app

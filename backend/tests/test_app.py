@@ -88,3 +88,18 @@ def test_tutor_socket_runs_a_check_and_speaks_the_hint(monkeypatch):
         result = next(m for m in seen if m["type"] == "result")
         assert result["finding"]["step_id"] == "s2"
         assert next(m for m in seen if m["type"] == "say")["text"] == "What did you do with the 5?"
+
+
+def test_access_gate_locks_everything_but_health_until_the_code_is_used():
+    c = TestClient(create_app(settings(access_code="s3cret")), follow_redirects=False)
+    assert c.get("/api/health").status_code == 200
+    assert c.post("/api/sessions").status_code == 401
+    assert c.get("/").status_code == 401
+    with pytest.raises(WebSocketDisconnect) as exc, c.websocket_connect("/ws/tutor") as ws:
+        ws.receive_text()
+    assert exc.value.code == 4401
+    assert c.get("/?code=wrong").status_code == 401
+    r = c.get("/?code=s3cret")
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert c.post("/api/sessions").status_code == 200  # cookie now set
+    assert c.post("/api/sessions").json()["phone_url"].endswith("?code=s3cret")
