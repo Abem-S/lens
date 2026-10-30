@@ -175,7 +175,7 @@ _DEGREE = re.compile(r"\^\s*\{?\s*\\circ\s*\}?|\\degree")
 _PERCENT = re.compile(r"\\%")
 
 
-def numeric_sides(latex: str) -> list[sp.Expr] | None:
+def numeric_sides(latex: str) -> list[list[sp.Expr]] | None:
     """Pull plain arithmetic out of a wordy line, for a SymPy check.
 
     "Total weight = (8 \\times 2.5)\\,\\text{kg} = 18\\,\\text{kg}" -> [20, 18].
@@ -186,7 +186,7 @@ def numeric_sides(latex: str) -> list[sp.Expr] | None:
     s = _clean(latex)
     if _INEQUALITY.search(s) or "\\pm" in s:
         return None
-    out: list[sp.Expr] = []
+    runs: list[list[sp.Expr]] = [[]]
     units: set[str] = set()
     for part in _split_top_level(s):
         unit = " ".join(m.group(2).strip() + (m.group(3) or "").replace(" ", "") for m in _TEXT_GROUP.finditer(part))
@@ -194,16 +194,30 @@ def numeric_sides(latex: str) -> list[sp.Expr] | None:
             unit += " deg"
         if _PERCENT.search(part):
             unit += " %"
+        # Words are allowed only as a leading label or a trailing unit; words between
+        # numbers ("7 and 2 x 5") join separate statements, so the chain breaks there.
+        inner = _TEXT_GROUP.sub("\x00", part).strip()
+        if "\x00" in inner.strip("\x00 ,;:.").strip():
+            core = inner.strip("\x00 ,;:.")
+            if "\x00" in core:
+                runs.append([])
+                continue
         body = _PERCENT.sub(" ", _DEGREE.sub(" ", _TEXT_GROUP.sub(" ", part))).strip().strip(",;:").strip()
-        if not body or re.search(r"[A-Za-z]", re.sub(r"\\(frac|dfrac|times|cdot|div|sqrt|left|right)", "", body)):
-            continue  # a word or a variable is left: not plain arithmetic
+        if (not body or "," in body
+                or re.search(r"[A-Za-z]", re.sub(r"\\(frac|dfrac|times|cdot|div|sqrt|left|right)", "", body))):
+            runs.append([])  # a word, a variable or a list: not plain arithmetic; the chain breaks
+            continue
         try:
             v = _fix_symbols(parse_latex(body))
         except Exception:
+            runs.append([])
             continue
         if isinstance(v, sp.Expr) and not v.free_symbols and v.is_number:
-            out.append(v)
+            runs[-1].append(v)
             units.add(unit.strip())
+        else:
+            runs.append([])
     if len(units) > 1:
         return None  # different units on different sides: a conversion, not arithmetic
-    return out if len(out) >= 2 else None
+    runs = [r for r in runs if len(r) >= 2]
+    return runs or None

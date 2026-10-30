@@ -138,6 +138,10 @@ def test_lost_root_is_not_claimed_as_error():
     ("3 \\, \\text{kg} = 3000 \\, \\text{g}", False),  # a unit conversion, not 3 = 3000
     ("\\text{Speed} = \\frac{100}{4} \\text{m/s} = 20 \\text{m/s}", True),
     ("\\text{Discount} = 20\\% \\text{ of } 50 = 10", False),  # mixed: % on one side only
+    ("2^2=-4a(-3), \\text{ i.e., } a=\\frac{1}{3}.", False),  # 4 and 1/3 are not claimed equal
+    # Words between numbers join separate statements: SymPy leaves the line to the model
+    # rather than read "7 and 2 x 5" as one product.
+    ("\\text{so } 3 + 4 = 7 \\text{ and } 2 \\times 5 = 11", False),
 ])
 def test_arithmetic_inside_words_is_checked_by_sympy(line, wrong):
     checked, finding = check_page(page(line))

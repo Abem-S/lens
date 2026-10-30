@@ -291,8 +291,8 @@ def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Findi
     # Wordy lines can still hold plain arithmetic ("so the total is 8 x 2.5 = 18 kg"):
     # SymPy checks that part, and only a mismatch counts (a match proves nothing else).
     for i, cur in enumerate(analysed):
-        nums = numeric_sides(page.steps[i].latex) if cur.kind == "unparseable" else None
-        if nums and any(equivalent(a, b) is False for a, b in pairwise(nums)):
+        runs = numeric_sides(page.steps[i].latex) if cur.kind == "unparseable" else None
+        if runs and any(equivalent(a, b) is False for run in runs for a, b in pairwise(run)):
             results[i] = StepResult("error", "arithmetic: the two sides are not equal", "sympy")
     first_sympy_error = next((i for i, r in enumerate(results) if r.verdict == "error"), len(results))
 
