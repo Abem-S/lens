@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
-from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI, RateLimitError
+from openai import (APIConnectionError, APITimeoutError, BadRequestError, InternalServerError, OpenAI,
+                    RateLimitError)
 
 from lens.config import Settings
 
@@ -74,6 +75,9 @@ class SparkClient:
     retries: int = 3
     http_client: httpx.Client | None = None
     calls: list[CallLog] = field(default_factory=list)
+    # Set to False after the server rejects `reasoning_effort` (some self-hosted
+    # OpenAI-compatible servers do); later calls then leave it out.
+    send_effort: bool = True
 
     def __post_init__(self) -> None:
         # We retry ourselves so that every attempt is logged.
@@ -83,7 +87,7 @@ class SparkClient:
     @classmethod
     def from_settings(cls, s: Settings) -> SparkClient:
         if not s.baseten_key:
-            raise RuntimeError("BASETEN is not set; add it to .env")
+            raise RuntimeError("BASETEN (or SPARK_API_KEY) is not set; add it to .env")
         return cls(api_key=s.baseten_key, base_url=s.spark_base_url, model=s.spark_model,
                    price_in=s.spark_price_in, price_out=s.spark_price_out)
 
@@ -110,16 +114,25 @@ class SparkClient:
 
     def _kwargs(self, messages, effort, max_tokens, json_mode) -> dict:
         kw: dict[str, Any] = {"model": self.model, "messages": messages, "max_tokens": max_tokens}
-        if effort:
+        if effort and self.send_effort:
             kw["reasoning_effort"] = effort
         if json_mode:
             kw["response_format"] = {"type": "json_object"}
         return kw
 
+    def _live(self, kw: dict) -> dict:
+        return kw if self.send_effort else {k: v for k, v in kw.items() if k != "reasoning_effort"}
+
     def _with_retries(self, fn):
         delay = 1.0
         for attempt in range(self.retries + 1):
             try:
+                return fn()
+            except BadRequestError as exc:
+                if not (self.send_effort and "reasoning_effort" in str(exc)):
+                    raise
+                log.warning("spark: server rejects reasoning_effort; sending calls without it")
+                self.send_effort = False
                 return fn()
             except _RETRYABLE as exc:
                 if attempt == self.retries:
@@ -145,7 +158,7 @@ class SparkClient:
             parts: list[str] = []
             usage = None
             first = None
-            for chunk in self._client.chat.completions.create(**kw):
+            for chunk in self._client.chat.completions.create(**self._live(kw)):
                 if chunk.usage:
                     usage = chunk.usage
                 for choice in chunk.choices or []:
@@ -215,7 +228,7 @@ class SparkClient:
         start = time.monotonic()
         kw = self._kwargs(messages, effort, max_tokens, False)
         kw.update(stream=True, stream_options={"include_usage": True})
-        chunks = self._with_retries(lambda: self._client.chat.completions.create(**kw))
+        chunks = self._with_retries(lambda: self._client.chat.completions.create(**self._live(kw)))
         entry = CallLog(purpose, effort)
         try:
             for chunk in chunks:

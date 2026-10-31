@@ -80,6 +80,29 @@ def test_retries_on_server_error_then_succeeds(monkeypatch):
     assert attempts["n"] == 3
 
 
+def test_server_that_rejects_reasoning_effort_is_tolerated():
+    bodies = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        bodies.append(body)
+        if "reasoning_effort" in body:
+            return httpx.Response(400, json={"error": {"message": "Unrecognized field: reasoning_effort"}})
+        return sse_response(completion("fine"))
+
+    c = client_with(handler)
+    assert c.ask("hi", effort="low").text == "fine"
+    assert c.ask("again", effort="low").text == "fine"
+    assert ["reasoning_effort" in b for b in bodies] == [True, False, False]  # asked once, then left out
+
+
+def test_other_bad_requests_still_raise():
+    import openai
+
+    with pytest.raises(openai.BadRequestError):
+        client_with(lambda req: httpx.Response(400, json={"error": {"message": "bad image"}})).ask("hi", effort="low")
+
+
 def test_empty_reply_raises():
     with pytest.raises(EmptyReply):
         client_with(lambda req: sse_response(completion(None))).ask("hi")

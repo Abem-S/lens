@@ -28,6 +28,8 @@ def _float(name: str) -> float | None:
 
 @dataclass(frozen=True)
 class Settings:
+    # Key for the Spark-compatible endpoint: SPARK_API_KEY when set (e.g. self-hosted
+    # Muse Glimmer on Modal), else BASETEN. Field name kept for existing callers.
     baseten_key: str | None
     spark_base_url: str
     spark_model: str
@@ -43,7 +45,7 @@ class Settings:
     def from_env(cls) -> Settings:
         load_dotenv()
         return cls(
-            baseten_key=os.environ.get("BASETEN") or None,
+            baseten_key=os.environ.get("SPARK_API_KEY") or os.environ.get("BASETEN") or None,
             spark_base_url=os.environ.get("SPARK_BASE_URL", "https://inference.baseten.co/v1"),
             spark_model=os.environ.get("SPARK_MODEL", "meta-models/muse-spark-open-1026"),
             spark_price_in=_float("SPARK_PRICE_IN_PER_M"),
