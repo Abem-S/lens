@@ -19,13 +19,19 @@ Built for every student who studies on paper.
 | Locate the wrong region (mask) and where the student points (fingertip / pen tip) | **SAM 3.1** `facebook/sam3.1` (backup `facebook/sam3`, which has `model.safetensors`) | Self-hosted on **Modal** GPU (~16 GB VRAM) | Access approved on Hugging Face for both repos. Text prompt is a short noun phrase → box + mask per match. ~30–60 s cold start: keep warm during sessions. |
 | Speech to text | **Omnilingual ASR** `facebook/omniASR-CTC-1B` (backup `omniASR-CTC-300M`) | Modal | Not gated. Apache 2.0. ~2 GB VRAM for 300M. Supports Amharic (future). |
 | Speech output | **Kokoro-82M** | Modal or CPU | Meta's TTS models (MMS-TTS, SeamlessM4T) are CC BY-NC: unusable for a startup. |
+| Fallback brain when the shared Spark endpoint is slow on images | **Muse Glimmer** 30B (Apache 2.0) as `RedHatAI/Muse-Glimmer-30B-FP8-block` + DFlash draft head `meta-models/Muse-Glimmer-30B-assistant` | Self-hosted on **Modal**, one L40S, vLLM 0.28 OpenAI-compatible (`backend/modal_apps/glimmer.py`, app `muna-lens-glimmer`, served name `muse-glimmer`, bearer key `GLIMMER_API_KEY`). Switched to purely by settings: `SPARK_API_KEY`, `SPARK_BASE_URL`, `SPARK_MODEL=muse-glimmer` | Measured 2026-10-30, 13 EDU-CIRCUIT-HW pages one after another, warm: page read median 11.5 s, p90 13.1 s, max 13.7 s. Text reply first token 2.4–3.4 s (Spark: 1.3–1.6 s). Cold start 229 s. Reading similarity on 15 pages: mean 0.78, median 0.91 (Spark on the same pages: 0.80 / 0.87). L40S ≈ $1.95/h while warm (≈ $0.006 per page read when busy); scales to zero after 180 s idle. `reasoning_effort` is mapped onto Glimmer's "Reasoning strength" (`minimal` → `low`); low uses about half the tokens of high. |
 
 Muse Spark Open gotchas:
 - It is a reasoning model. Reasoning tokens count against `max_tokens`; with `max_tokens=300` it returned `None`. Use ≥1500 for replies, ≥3000 for page checks.
 - It accepts audio (`{"type":"audio_url","audio_url":{"url":"data:audio/wav;base64,..."}}` and `input_audio` both work) and transcribes accurately, but a reply from audio starts after 4–5 s. Live speech goes through Omnilingual ASR → text instead.
 - At low reasoning effort a hint leaked the step ("subtract 5 from one side…"). The guardrail (A4) is required, not optional.
 
-Muse Glimmer is out of scope: it adds nothing over Spark Open.
+Spark on Baseten stays the default. Re-test on 2026-10-30, 13 page reads over 11 minutes (`low` effort): 12 took 6.7–10.8 s (p90 10.8 s), and one queued 76 s before its first byte (81 s in total). Text replies took 1.4–1.7 s (the first, 3.3 s). The rule was "usable if p90 ≤ 15 s and no call over 45 s", so it failed on that one outlier. Glimmer is the self-hosted fallback. Reading quality is about even, and Glimmer never queues, but it is slower on text and costs GPU time while warm.
+
+Muse Glimmer gotchas:
+- On a 48 GB L40S, the FP8 weights plus the draft head take 37.3 GiB. At 32k context there was too little room left for the KV cache (0.52 GiB) and the engine failed to start. The app uses 16k context, `--gpu-memory-utilization 0.95` and 4 sequences, which leaves 1.87 GiB.
+- vLLM prints its CLI args, so `--api-key` would put the key in the Modal logs. The key goes in through `VLLM_API_KEY` instead.
+- The reasoning parser (`muse_glimmer`) sends reasoning into `reasoning_content`, so `content` holds only the answer and `response_format=json_object` works.
 
 ## Product decisions (settled)
 
@@ -131,7 +137,7 @@ Update this table when a node moves. "Built offline" means the code and its offl
 | Node | Status | What remains |
 |---|---|---|
 | A0 | Done | — |
-| A1 | Done: live text, image and audio calls pass and log cost. Every call streams under the hood; slow image calls are hedged | Confirm Baseten's price (using 1.25 / 4.25 USD per M tokens from a third-party listing) |
+| A1 | Done: live text, image and audio calls pass and log cost. Every call streams under the hood; slow image calls are hedged. `SPARK_API_KEY` (wins over `BASETEN`) + `SPARK_BASE_URL` + `SPARK_MODEL` point it at any Spark-compatible server (Glimmer on Modal verified); a server that rejects `reasoning_effort` is tolerated | Confirm Baseten's price (using 1.25 / 4.25 USD per M tokens from a third-party listing) |
 | A2 | Measured: reading 15 real EDU-CIRCUIT-HW pages scores a median 0.93 similarity to expert transcriptions (mean 0.82; low scores are diagram-heavy pages). Boxes are asked as corners | A few pages read at 0.56–0.76; "every step on 10 pages" not yet met strictly |
 | A3 | Done: SymPy checker (+ arithmetic inside wordy lines), whole-page model judge with a confirmation pass, re-read before a SymPy claim | Tune on more eval results |
 | A4 | Done: 20 planted mistakes, hints at `low` effort, independent high-effort audit flagged 0 leaks | Make the more generic hints more specific |
@@ -147,4 +153,4 @@ Update this table when a node moves. "Built offline" means the code and its offl
 | F2 | Prepared: `deploy/setup-lightsail.sh` (systemd + Caddy HTTPS), optional `LENS_ACCESS_CODE` tester gate | Run on the Lightsail instance; login choice |
 | F3 | Not started | Real students, after F2 |
 
-Known issue: image calls on the shared Baseten endpoint sometimes queue 20–200 s (text replies stay ~1 s). Page reads are slow until that improves; a dedicated deployment is the likely fix.
+Known issue: image calls on the shared Baseten endpoint sometimes queue for a minute or more (1 in 13 on 2026-10-30, 81 s; earlier runs saw 20–200 s). Text replies stay ~1.5 s. Fallback: self-hosted Muse Glimmer on Modal (see *Model stack*), with steady 8–14 s warm page reads. Deploy it with `make deploy-glimmer` and switch with the `SPARK_*` settings in `.env.example`.
