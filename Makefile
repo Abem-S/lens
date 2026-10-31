@@ -1,4 +1,4 @@
-.PHONY: install dev dev-https serve test build eval deploy-gpu
+.PHONY: install dev dev-https serve test build eval deploy-gpu deploy-glimmer
 
 install:            ## install backend + frontend dependencies
 	cd backend && uv sync --extra eval --extra gpu
@@ -32,3 +32,7 @@ eval:               ## A5 scorecard (needs BASETEN; FERMAT also needs HF_TOKEN)
 deploy-gpu:         ## deploy SAM + voice services to Modal (needs MODAL_TOKEN_*, HF_TOKEN)
 	cd backend && uv run --extra gpu modal deploy modal_apps/sam.py
 	cd backend && uv run --extra gpu modal deploy modal_apps/voice.py
+
+deploy-glimmer:     ## optional: Muse Glimmer on Modal (needs MODAL_TOKEN_*, GLIMMER_API_KEY in the environment)
+	cd backend && uv run --extra gpu modal run modal_apps/glimmer.py::download
+	cd backend && uv run --extra gpu modal deploy modal_apps/glimmer.py
