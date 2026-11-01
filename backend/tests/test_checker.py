@@ -102,6 +102,16 @@ def test_model_judges_only_lines_sympy_cannot_parse():
     assert checked.steps[0].verified_by == "sympy"
 
 
+def test_parsed_lines_sympy_cannot_settle_go_to_the_judge():
+    # s2 substitutes given data: SymPy parses it but cannot decide, so the model may.
+    calls = []
+    checked, finding = check_page(page("F = ma", "F = 2 \\cdot 3", "F = 6"),
+                                  lambda pg, c: calls.append(c) or ("s2", "wrong mass"))
+    assert calls == [["s2"]]
+    assert finding is not None and finding.step_id == "s2"
+    assert checked.steps[1].verified_by == "model"
+
+
 def test_model_cannot_flag_an_algebra_line():
     # The judge tries to flag a SymPy-checked line; it is ignored.
     _, finding = check_page(page("2x + 5 = 11", "2x = 6", "\\text{so } x = 3"), lambda pg, c: ("s2", "nope"))
@@ -115,7 +125,7 @@ def test_judge_is_not_asked_about_lines_after_a_sympy_error():
 
 
 def test_lines_before_the_flagged_one_are_ok_by_model():
-    checked, finding = check_page(page("\\text{Let } v = 3", "\\text{then } 2v = 7", "\\text{so } v = 3.5"),
+    checked, finding = check_page(page("\\text{Let } v = 3", "\\text{then } 2v = 7", "\\text{so } v = 3.5 \\text{ m/s}"),
                                   lambda pg, c: ("s2", "doubling error"))
     assert [s.status for s in checked.steps] == ["ok", "error", "unverifiable"]
     assert finding.step_id == "s2" and finding.kind == "doubling error"
@@ -150,3 +160,54 @@ def test_arithmetic_inside_words_is_checked_by_sympy(line, wrong):
         assert "arithmetic" in finding.kind
     else:
         assert finding is None
+
+
+# Shapes from FERMAT pages: named lengths, substituted values, rounding, separated
+# variables. None of these is a mistake; each once raised (or could raise) a false alarm.
+@pytest.mark.parametrize("lines", [
+    ["QR = \\sqrt{(4+1)^2 + (2+1)^2} = \\sqrt{25+9} = \\sqrt{34}"],
+    ["AB = \\sqrt{34}", "BC = \\sqrt{25+9} = \\sqrt{34}"],
+    ["\\int \\frac{dy}{1+y^2} = \\int \\frac{dx}{1+x^2}"],
+    ["\\sqrt{34} = 5.83"],
+    ["A = \\pi r^2 = \\pi \\cdot 7^2 = 153.94"],
+    ["\\frac{22}{7} \\times 49 = 154"],
+    ["\\pi \\times 49 = 154"],
+    ["\\text{Area} = 3.14 \\times 7^2 = 153.9 \\text{ cm}^2"],
+    ["F = ma = 2 \\cdot 3 = 6"],
+])
+def test_fermat_shapes_are_not_false_alarms(lines):
+    _, finding = check_page(page(*lines))
+    assert finding is None, (lines, finding)
+
+
+@pytest.mark.parametrize("lines", [
+    ["2x - 3 = x + 2", "\\text{i.e.,}", "2x = x + 5", "\\Rightarrow x = 5"],
+    ["x^2 - 5x + 6 = 0", "\\Rightarrow (x-2)(x-3) = 0 \\quad (1)"],
+    ["2x = x + 5", "2x - x = x + 5 - x \\text{ (subtracting x from both sides)}", "x = 5"],
+    ["\\text{So, } x + 1 = 4", "x = 3"],
+    ["(a+b)^2 = a^2 + 2ab", "+b^2)"],  # a fragment of a longer line is not read as maths
+    ["\\text{we get: } A + B = 0", "2A + B = 1"],  # a system of equations, not a rearrangement
+    ["53240 \\div 5 = 2\\;2\\;2\\;11\\;11\\;11"],  # a factor list whose signs were lost
+])
+def test_linking_words_and_remarks_are_not_maths(lines):
+    _, finding = check_page(page(*lines))
+    assert finding is None, (lines, finding)
+
+
+@pytest.mark.parametrize("lines,wrong", [
+    # From FERMAT pages the checker used to miss: linking lines broke the chain,
+    # "\Rightarrow" and remarks made lines unparseable, "= ..." after an equation was not linked.
+    (["21(n-1)(-3) = 0", "\\text{i.e.,}", "3(n-1) = 21"], 2),
+    (["10x \\times \\frac{8}{x} + 18 = 10 \\cdot \\frac{8}{x} + x", "\\Rightarrow 10x^2 \\times 8 + 18x = 80 + x^2"], 1),
+    (["2x = x + 5", "2x - x = x + 5 - x \\text{ (subtracting x from both sides)}", "x = 5 + x"], 2),
+    (["a_{20} = (20-1)(2-20)(3+20)", "= 19 \\times (-18) \\times 23 + 1 = -7865"], 1),
+    (["7 \\times 8 = 54"], 0),  # plain numbers on both sides
+    (["\\sqrt{34} = 6.83"], 0),  # rounding does not excuse a wrong value
+    (["QR = \\sqrt{(4+1)^2 + (2+1)^2} = \\sqrt{25+4}"], 0),  # past the name, the arithmetic is checked
+    (["F = ma = 2 \\cdot 3 = 5"], 0),
+    (["x^2 = 49", "\\pi \\cdot 49 = 145"], 1),
+])
+def test_numeric_claims_are_checked(lines, wrong):
+    checked, finding = check_page(page(*lines))
+    assert finding is not None and finding.step_id == f"s{wrong + 1}", (lines, finding)
+    assert checked.steps[wrong].verified_by == "sympy"

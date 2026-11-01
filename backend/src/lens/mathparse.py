@@ -40,6 +40,7 @@ class StepMath:
     variants: list[tuple[sp.Expr, sp.Expr]] = field(default_factory=list)
     continuation: bool = False  # line starts with "=" and continues the previous one
     reason: str = ""
+    decimals: int = 0  # most decimal places written in the line: how far a student may have rounded
 
     @property
     def has_calculus(self) -> bool:
@@ -50,12 +51,50 @@ class StepMath:
         return self.sides[-1]
 
 
+def decimal_places(latex: str) -> int:
+    """Most digits written after a decimal point anywhere in the line (0 if none)."""
+    return max((len(m) for m in re.findall(r"\d\.(\d+)", latex)), default=0)
+
+
+# Words that only say "this line follows from the one above".
+_CONNECTOR_WORDS = r"(?:i\.?\s*e\.?|so|then|thus|hence|therefore|we\s+have|we\s+get|which\s+gives|this\s+gives|giving|that\s+is)"
+_LEAD_ARROW = re.compile(r"^(\\(Rightarrow|implies|Longrightarrow|therefore|Leftrightarrow|iff)(?![a-zA-Z])\s*)+")
+_LEAD_CONNECTOR = re.compile(r"^\\text\{\s*" + _CONNECTOR_WORDS + r"\s*[,.:;]?\s*\}\s*", re.IGNORECASE)
+# A trailing remark: "\text{ (subtracting x from both sides)}", "\quad (1)", "\text{,}".
+_TRAIL_REMARK = re.compile(r"(\s*(\\q?quad|~)\s*)*(\\text\{\s*(\(.*?\)|\.\.\.\s*\(\d+\)|[,.;:]*)\s*\}|\(\d+\))\s*$")
+_CONNECTOR_LINE = re.compile(r"^\s*(and\s+|now\s+)?" + _CONNECTOR_WORDS + r"\s*[,.:;]?\s*$", re.IGNORECASE)
+
+
+def is_connector(latex: str) -> bool:
+    """A line of only linking words ("i.e.", "So,", "Therefore,"): no claim of its own."""
+    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", latex.strip().strip("$"))
+    text = _LEAD_ARROW.sub("", text.strip())
+    return bool(_CONNECTOR_LINE.match(text))
+
+
+def _balanced(s: str) -> bool:
+    depth = 0
+    for ch in s:
+        depth += ch in "{(["
+        depth -= ch in "})]"
+        if depth < 0:
+            return False
+    return depth == 0
+
+
 def _clean(latex: str) -> str:
     s = latex.strip().strip("$").strip()
     s = s.replace(r"\,", " ").replace(r"\;", " ").replace(r"\!", "").replace(r"\ ", " ")
     s = s.replace(r"\displaystyle", "")
     s = re.sub(r"\\(begin|end)\{[a-z*]+\}", "", s)
-    s = s.rstrip(".").strip()
+    # Linking words and arrows in front ("\Rightarrow", "\text{i.e., }") and a
+    # remark at the end ("\text{ (subtracting x from both sides)}") are not maths.
+    prev = None
+    while prev != s:
+        prev = s
+        s = _LEAD_CONNECTOR.sub("", _LEAD_ARROW.sub("", s.strip())).strip()
+        s = _TRAIL_REMARK.sub("", s).strip()
+    s = s.rstrip(".,;").strip()
     return s
 
 
@@ -96,6 +135,8 @@ def _fix_symbols(expr: sp.Expr) -> sp.Expr:
     for sym in expr.free_symbols:
         if sym.name == "e":
             subs[sym] = sp.E
+        elif sym.name == "pi":
+            subs[sym] = sp.pi
     if subs:
         expr = expr.xreplace(subs)
     # Students write decimals; work in exact rationals so 0.5 == 1/2.
@@ -130,6 +171,11 @@ def analyse(latex: str) -> StepMath:
     s = _clean(latex)
     if not s:
         return StepMath(latex, "unparseable", reason="empty line")
+    if not _balanced(s):
+        return StepMath(latex, "unparseable", reason="unbalanced brackets: part of a longer line")
+    if re.search(r"\d\s+\d", s):
+        # "2 2 2 11": numbers side by side are a factor list with lost signs, not one number.
+        return StepMath(latex, "unparseable", reason="numbers side by side")
     for cmd in _COMMAND.findall(s):
         if cmd not in _ALLOWED_COMMANDS:
             return StepMath(latex, "unparseable", reason=f"unsupported command \\{cmd}")
@@ -164,7 +210,7 @@ def analyse(latex: str) -> StepMath:
         kind = "equation"
     else:
         kind = "identity"  # a chain like a = b = c, or a calculus claim d/dx(..) = ..
-    sm = StepMath(latex, kind, sides=sides, continuation=continuation)
+    sm = StepMath(latex, kind, sides=sides, continuation=continuation, decimals=decimal_places(s))
     if kind == "equation":
         sm.variants = [(sides[0], sides[1])]
     return sm
@@ -203,7 +249,7 @@ def numeric_sides(latex: str) -> list[list[sp.Expr]] | None:
                 runs.append([])
                 continue
         body = _PERCENT.sub(" ", _DEGREE.sub(" ", _TEXT_GROUP.sub(" ", part))).strip().strip(",;:").strip()
-        if (not body or "," in body
+        if (not body or "," in body or re.search(r"\d\s+\d", body)
                 or re.search(r"[A-Za-z]", re.sub(r"\\(frac|dfrac|times|cdot|div|sqrt|left|right)", "", body))):
             runs.append([])  # a word, a variable or a list: not plain arithmetic; the chain breaks
             continue

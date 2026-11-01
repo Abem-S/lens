@@ -1,10 +1,14 @@
 """A3 Step checker: does each line follow from the one before it?
 
-Rules (AGENTS.md, hard rule 4): a claimed mistake is a verified mistake. If SymPy
-can parse both lines, only SymPy may call a step wrong; when it cannot decide, the
-step is "unverifiable" and nothing is said. Lines SymPy cannot parse (words,
-units, chemistry, inequalities) go to the model judge, if one is given, and are
-marked verified_by="model".
+Rules (AGENTS.md, hard rule 4): a claimed mistake is a verified mistake. A line
+SymPy has proved correct can never be called wrong. Lines SymPy cannot settle
+(words, units, chemistry, inequalities, values substituted from the question) go
+to the model judge, if one is given, and are marked verified_by="model"; without
+a judge they stay "unverifiable" and nothing is said.
+
+Lines of only linking words ("i.e.", "So,") are skipped when finding the line a
+step builds on; arrows and remarks around a line ("\\Rightarrow", "(subtracting
+x)") are dropped before parsing.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from typing import Literal
 import sympy as sp
 
 from lens.contract import Finding, Page, Step
-from lens.mathparse import StepMath, analyse, numeric_sides
+from lens.mathparse import StepMath, analyse, decimal_places, is_connector, numeric_sides
 
 Verdict = Literal["ok", "error", "unknown"]
 
@@ -163,6 +167,13 @@ def _compare_equations(prev: StepMath, cur: StepMath) -> StepResult:
     prev_syms = set().union(*(_zero_form(v).free_symbols for v in prev.variants))
     cur_syms = set().union(*(_zero_form(v).free_symbols for v in cur.variants))
     shared = prev_syms & cur_syms
+    if (not cur_syms and len(prev_syms) == 1 and len(cur.variants) == 1
+            and _zero_form(cur.variants[0]).is_number and _zero_form(cur.variants[0]) != 0):
+        # x = 5 + x: the variable cancelled into a contradiction, but the line above had a solution.
+        ps = _real_solutions(prev, next(iter(prev_syms)))
+        if ps:
+            return StepResult("error", "the new line has no solution but the line above does", "sympy")
+        return StepResult("unknown")
     if not shared or prev_syms != cur_syms:
         # Values were substituted (F = ma -> F = 2*3) or a new thread began.
         # SymPy cannot know the given data, so it stays quiet.
@@ -196,8 +207,16 @@ def _compare_equations(prev: StepMath, cur: StepMath) -> StepResult:
             any_ok = True
             break
         if all(v is False for v in verdicts):
-            kind = _sign_error_kind(prev, cur) or "the rearranged formula is not equivalent to the line above"
-            return StepResult("error", kind, "sympy")
+            # Two lines in several variables may be a system (A + B = 0, then 2A + B = 1),
+            # not one equation rearranged. Claim an error only for a sign slip, or when
+            # the new line solves for one variable (t = ...), i.e. a rearrangement.
+            sign = _sign_error_kind(prev, cur)
+            lhs, rhs = cur.variants[0]
+            solved = isinstance(lhs, sp.Symbol) and lhs not in rhs.free_symbols
+            if sign or solved:
+                return StepResult("error", sign or "the rearranged formula is not equivalent to the line above",
+                                  "sympy")
+            return StepResult("unknown")
     return StepResult("ok", by="sympy") if any_ok else StepResult("unknown")
 
 
@@ -221,17 +240,66 @@ def _indefinite_var(expr: sp.Expr) -> sp.Symbol | None:
     return None
 
 
+def _is_name(expr: sp.Expr) -> bool:
+    """A bare name: x, or letters run together like AB / QR (a length, a label).
+    "QR = sqrt(34)" defines QR; it is not a claim that Q*R equals sqrt(34)."""
+    return isinstance(expr, sp.Symbol) or (
+        isinstance(expr, sp.Mul) and all(isinstance(f, sp.Symbol) for f in expr.args))
+
+
+def _close_numbers(a: sp.Expr, b: sp.Expr, decimals: int) -> bool | None:
+    """Two plain numbers, allowing the rounding a student writes: 5.83 for sqrt(34),
+    154 for 49*pi. Exact rationals with no decimals written must match exactly."""
+    try:
+        va, vb = complex(a.evalf(30)), complex(b.evalf(30))
+    except (TypeError, ValueError):
+        return None
+    if abs(va.imag) > 1e-12 or abs(vb.imag) > 1e-12:
+        return None
+    va, vb = va.real, vb.real
+    if abs(va - vb) <= 1e-9 * max(1.0, abs(va)):
+        return True
+    # Rounding is only possible where a plain number stands for a value: a written
+    # decimal, or a whole number standing for an irrational (pi * 49 = 154).
+    rounded = bool(a.is_rational) != bool(b.is_rational) or (decimals > 0 and (a.is_rational or b.is_rational))
+    if not rounded:
+        return False
+    tol = max(10.0 ** -decimals if decimals > 0 else 0.5, 2e-3 * max(abs(va), abs(vb)))
+    return abs(va - vb) <= tol
+
+
+def _link(a: sp.Expr, b: sp.Expr, decimals: int) -> bool | None:
+    """Does a = b hold? None when the link is not a claim SymPy can judge."""
+    if _is_name(a) or _is_name(b):
+        return None
+    if bool(a.free_symbols) != bool(b.free_symbols):
+        # Values substituted from the question (F = ma = 2*3) are data SymPy lacks:
+        # only a constant expression (sin^2 x + cos^2 x = 1) can be confirmed.
+        return True if equivalent(a, b) is True else None
+    ia, ib = _indefinite_var(a), _indefinite_var(b)
+    if ia is not None and ib is not None:
+        return None  # integrating both sides (separating variables) states a step, not a result
+    if not a.free_symbols and not b.free_symbols and not a.has(*_CALC) and not b.has(*_CALC):
+        return _close_numbers(a, b, decimals)
+    return equivalent(a, b, up_to_constant_in=ia or ib)
+
+
+_CALC = (sp.Derivative, sp.Integral, sp.Limit)
+
+
 def _check_within(cur: StepMath) -> StepResult:
-    """A chain a = b = c, or a calculus claim, must hold on its own."""
+    """A chain a = b = c, or a calculus claim, must hold on its own. Every link
+    SymPy can judge is judged; one false link is an error."""
+    verdicts = []
     for a, b in zip(cur.sides, cur.sides[1:]):
-        var = _indefinite_var(a) or _indefinite_var(b)
-        eq = equivalent(a, b, up_to_constant_in=var)
+        eq = _link(a, b, cur.decimals)
         if eq is False:
-            return StepResult("error", _calculus_kind(a) if a.has(sp.Derivative, sp.Integral, sp.Limit) else
+            return StepResult("error", _calculus_kind(a) if a.has(*_CALC) else
                               "the two sides of this line are not equal", "sympy")
-        if eq is None:
-            return StepResult("unknown")
-    return StepResult("ok", by="sympy")
+        verdicts.append(eq)
+    if verdicts and all(v is True for v in verdicts):
+        return StepResult("ok", by="sympy")
+    return StepResult("unknown")
 
 
 def _expr_kind(a: sp.Expr, b: sp.Expr) -> str:
@@ -247,34 +315,46 @@ def check_pair(prev: StepMath | None, cur: StepMath) -> StepResult:
         return StepResult("unknown", by=None)
 
     # Some "equations" are identities ((x+1)^2 = x^2+2x+1): treat as a claim.
-    if cur.kind == "equation" and len(cur.variants) == 1 and equivalent(*cur.variants[0]) is True:
-        cur = StepMath(cur.latex, "identity", sides=cur.sides, continuation=cur.continuation)
+    # Plain numbers on both sides (7 x 8 = 56) are a claim to check, not an equation to solve.
+    if cur.kind == "equation" and len(cur.variants) == 1 and (
+            not any(s.free_symbols for s in cur.sides) or equivalent(*cur.variants[0]) is True):
+        cur = StepMath(cur.latex, "identity", sides=cur.sides, continuation=cur.continuation,
+                       decimals=cur.decimals)
 
     if cur.kind == "identity":
         within = _check_within(cur)
         if within.verdict != "ok" or prev is None or prev.kind == "unparseable":
             return within
-        # Also link to the previous line when this one continues its value.
-        if prev.kind in ("expression", "identity") and not cur.has_calculus:
+        # Also link to the previous line when this one continues its value: only
+        # from a bare expression line, and never through a name or new numbers.
+        if (prev.kind == "expression" and not cur.has_calculus and not _is_name(cur.sides[0])
+                and cur.sides[0].free_symbols):
             linked = equivalent(prev.last, cur.sides[0])
             if linked is False:
                 return StepResult("error", _expr_kind(prev.last, cur.sides[0]), "sympy")
         return within
 
-    if prev is None or prev.kind == "unparseable":
+    if prev is None:
         return StepResult("ok", by="sympy") if cur.kind in ("expression", "equation") else StepResult("unknown")
+    if prev.kind == "unparseable":
+        # The line it builds on is words SymPy cannot read (a setup from the question):
+        # nothing to compare with, so it is not verified; the model judge sees it.
+        return _check_within(cur) if len(cur.sides) > 1 and cur.kind == "expression" else StepResult("unknown")
 
     if cur.kind == "expression":
-        if prev.kind in ("expression", "identity"):
-            eq = equivalent(prev.last, cur.sides[0])
+        # "= ..." continues the previous line's last value; so does a bare expression
+        # under a bare expression. A bare expression under an equation starts a new thread.
+        if prev.kind in ("expression", "identity") or (cur.continuation and prev.kind == "equation"):
+            eq = _link(prev.last, cur.sides[0], max(prev.decimals, cur.decimals))
             if eq is False:
                 return StepResult("error", _expr_kind(prev.last, cur.sides[0]), "sympy")
-            if eq is None:
-                return StepResult("unknown")
             if len(cur.sides) > 1:
-                return _check_within(cur)
-            return StepResult("ok", by="sympy")
-        return StepResult("unknown")  # equation then a bare expression: new thread
+                within = _check_within(cur)
+                if within.verdict == "error" or eq is None:
+                    return within if within.verdict == "error" else StepResult("unknown")
+                return within
+            return StepResult("ok", by="sympy") if eq else StepResult("unknown")
+        return StepResult("unknown")
 
     # cur is an equation
     if prev.kind == "equation":
@@ -287,18 +367,29 @@ def check_pair(prev: StepMath | None, cur: StepMath) -> StepResult:
 def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Finding | None]:
     """Mark every step and return the first verified error, if any."""
     analysed = [analyse(s.latex) for s in page.steps]
-    results = [check_pair(analysed[i - 1] if i > 0 else None, cur) for i, cur in enumerate(analysed)]
+    # A line of only linking words ("i.e.", "So,") is transparent: the next line
+    # is compared with the maths above it.
+    connector = [is_connector(s.latex) for s in page.steps]
+    prevs: list[StepMath | None] = []
+    last: StepMath | None = None
+    for i, cur in enumerate(analysed):
+        prevs.append(last)
+        if not connector[i]:
+            last = cur
+    results = [check_pair(prevs[i], cur) for i, cur in enumerate(analysed)]
     # Wordy lines can still hold plain arithmetic ("so the total is 8 x 2.5 = 18 kg"):
     # SymPy checks that part, and only a mismatch counts (a match proves nothing else).
     for i, cur in enumerate(analysed):
         runs = numeric_sides(page.steps[i].latex) if cur.kind == "unparseable" else None
-        if runs and any(equivalent(a, b) is False for run in runs for a, b in pairwise(run)):
+        places = decimal_places(page.steps[i].latex)
+        if runs and any(_close_numbers(a, b, places) is False for run in runs for a, b in pairwise(run)):
             results[i] = StepResult("error", "arithmetic: the two sides are not equal", "sympy")
     first_sympy_error = next((i for i, r in enumerate(results) if r.verdict == "error"), len(results))
 
-    # Only lines SymPy cannot parse go to the model, and only those before the
-    # first SymPy-verified error (we report the first mistake only).
-    candidates = [page.steps[i].id for i in range(first_sympy_error) if analysed[i].kind == "unparseable"]
+    # Lines SymPy could not decide go to the model: lines it cannot parse, and parsed
+    # lines it could not settle (values substituted from the question, a new thread).
+    # Only those before the first SymPy-verified error (we report the first mistake only).
+    candidates = [page.steps[i].id for i in range(first_sympy_error) if results[i].verdict == "unknown"]
     if judge is not None and candidates:
         flagged, kind = judge(page, candidates)
         flagged_at = next((i for i, s in enumerate(page.steps) if s.id == flagged and s.id in candidates), None)
