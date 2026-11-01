@@ -193,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="print JSON instead of a table")
     ap.add_argument("--balanced", action="store_true", help="FERMAT: half error pages, half clean, seeded sample")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--exclude-seed", type=int, help="FERMAT: leave out the pages that --seed N with the same "
+                    "--limit would pick (a held-out sample, disjoint from the tuning one)")
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--save", help="write per-page results (JSONL) here, e.g. .cache/eval/runs/x.jsonl")
     args = ap.parse_args(argv)
@@ -219,7 +221,9 @@ def main(argv: list[str] | None = None) -> int:
         if src == "fermat" and args.balanced:
             from lens.eval.loaders import eval_cache, sample_fermat_ids
 
-            kw["ids"] = sample_fermat_ids(eval_cache(), args.limit, args.seed, args.shards)
+            exclude = (sample_fermat_ids(eval_cache(), args.limit, args.exclude_seed, args.shards)
+                       if args.exclude_seed is not None else None)
+            kw["ids"] = sample_fermat_ids(eval_cache(), args.limit, args.seed, args.shards, exclude=exclude)
         try:
             items.extend(itertools.islice(load(src, **kw), args.limit))
         except RuntimeError as exc:

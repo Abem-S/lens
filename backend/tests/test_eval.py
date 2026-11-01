@@ -120,6 +120,20 @@ def test_gate_passes_at_one_in_twenty():
     assert Score("x", false_alarms=2, clean_ok=18).gate_passed is False
 
 
+def test_held_out_sample_is_disjoint_from_the_tuning_one(tmp_path):
+    from lens.eval.loaders import sample_fermat_ids
+
+    data = tmp_path / "fermat" / "data"
+    data.mkdir(parents=True)
+    rows = [{"new_custom_id": f"p{i}", "has_error": i % 2 == 0} for i in range(40)]
+    pq.write_table(pa.Table.from_pylist(rows), data / "train-00000-of-00010.parquet")
+    tune = sample_fermat_ids(tmp_path, 10, seed=7, shards=1)
+    held = sample_fermat_ids(tmp_path, 10, seed=8, shards=1, exclude=tune)
+    assert len(tune) == len(held) == 10
+    assert not tune & held
+    assert sum(int(i[1:]) % 2 == 0 for i in held) == 5  # still balanced
+
+
 def test_reading_similarity_ignores_latex_markup():
     page = Page(steps=[Step(id="s1", latex="V = I R"), Step(id="s2", latex="\\text{so } I = 2")])
     assert reading_similarity(page, "$V = IR$\n\nso $I = 2$") == pytest.approx(1.0)

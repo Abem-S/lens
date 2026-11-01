@@ -77,8 +77,11 @@ def fermat_shards(cache: Path, shards: int | None = None) -> list[Path]:
     ]
 
 
-def sample_fermat_ids(cache: Path, n: int, seed: int = 0, shards: int | None = None) -> set[str]:
-    """Pick n/2 pages with a planted error and n/2 clean pages, reproducibly."""
+def sample_fermat_ids(cache: Path, n: int, seed: int = 0, shards: int | None = None,
+                      exclude: set[str] | None = None) -> set[str]:
+    """Pick n/2 pages with a planted error and n/2 clean pages, reproducibly.
+
+    `exclude` keeps a held-out sample apart from the one a change was tuned on."""
     import random
 
     import pyarrow.parquet as pq
@@ -86,6 +89,7 @@ def sample_fermat_ids(cache: Path, n: int, seed: int = 0, shards: int | None = N
     rows = []
     for shard in fermat_shards(cache, shards):
         rows += pq.read_table(shard, columns=["new_custom_id", "has_error"]).to_pylist()
+    rows = [r for r in rows if not exclude or r["new_custom_id"] not in exclude]
     rng = random.Random(seed)
     err = sorted(r["new_custom_id"] for r in rows if r["has_error"])
     clean = sorted(r["new_custom_id"] for r in rows if not r["has_error"])
