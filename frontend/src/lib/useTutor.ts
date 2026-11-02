@@ -16,6 +16,7 @@ const TRIGGER_NOTE: Record<string, string> = {
   new_ink: "New line spotted. Reading…",
   ink_removed: "Something changed. Reading…",
   page_changed: "New page. Reading…",
+  line_done: "Line finished. Reading…",
   manual: "Reading your page…",
 };
 
@@ -24,7 +25,7 @@ const TRIGGER_NOTE: Record<string, string> = {
  * Checks go over the tutor socket so the tutor knows the page; if the socket is
  * down they fall back to plain HTTP.
  */
-export function useTutor(getFrame?: () => Promise<Blob | null>) {
+export function useTutor(getFrame?: () => Promise<Blob | null>, trackId?: string) {
   const [state, setState] = useState<TutorState>("connecting");
   const [result, setResult] = useState<CheckResult | null>(null);
   const [captions, setCaptions] = useState<Caption[]>([]);
@@ -57,7 +58,8 @@ export function useTutor(getFrame?: () => Promise<Blob | null>) {
     const sock = new WebSocket(`${proto}://${window.location.host}/ws/tutor`);
     sock.binaryType = "arraybuffer";
     ws.current = sock;
-    sock.onopen = () => sock.send(JSON.stringify({ type: "hello", voice: false, opening: false }));
+    // `track`: live tracking already knows where the student points (lib/tracking.ts).
+    sock.onopen = () => sock.send(JSON.stringify({ type: "hello", voice: false, opening: false, track: trackId }));
     sock.onclose = () => setState("offline");
     sock.onmessage = (ev) => {
       if (typeof ev.data !== "string") {

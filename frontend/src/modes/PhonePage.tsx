@@ -4,6 +4,7 @@ import { useCamera, useInterval, useWakeLock } from "../lib/camera";
 import { ChangeDetector, type Trigger } from "../lib/changeDetect";
 import { FrameSampler, grabJpeg } from "../lib/frames";
 import { STATE_LABEL } from "../lib/detectorLabels";
+import { PHASE_LABEL, stillTriggerAllowed, useTracking } from "../lib/tracking";
 
 /** Phone side: film the page, decide when it changed, stream frames to the laptop. */
 export function PhonePage({ sessionId }: { sessionId: string }) {
@@ -14,9 +15,23 @@ export function PhonePage({ sessionId }: { sessionId: string }) {
   const sampler = useRef<FrameSampler | null>(null);
   const detector = useRef(new ChangeDetector());
   const sending = useRef(false);
+  const [trackId, setTrackId] = useState<string | null>(null); // sent by the laptop, shared with its tutor
   useWakeLock(true);
+  // Live SAM 3.1 tracking: decides when a line is done; its events go on to the laptop.
+  const track = useTracking(() => videoRef.current, ready && linked === "linked" && !!trackId, {
+    id: trackId ?? undefined,
+    onLineDone: () => send("check", "line_done"),
+    onTrack: (m) => {
+      const sock = ws.current;
+      if (sock?.readyState === WebSocket.OPEN)
+        sock.send(JSON.stringify({ type: "track", seq: m.seq, phase: m.phase, follow: m.follow,
+          pointer: m.pointer, pointer_kind: m.pointer_kind }));
+    },
+  });
+  const trackRef = useRef(track);
+  trackRef.current = track;
 
-  const send = async (kind: "preview" | "check", reason?: Trigger | "manual") => {
+  const send = async (kind: "preview" | "check", reason?: Trigger | "manual" | "line_done") => {
     const v = videoRef.current, sock = ws.current;
     if (!v || !sock || sock.readyState !== WebSocket.OPEN) return;
     if (kind === "preview" && (sending.current || sock.bufferedAmount > 256_000)) return;
@@ -24,7 +39,7 @@ export function PhonePage({ sessionId }: { sessionId: string }) {
     const blob = kind === "check" ? await grabJpeg(v) : await grabJpeg(v, 720, 0.6);
     sending.current = false;
     if (!blob) return;
-    sock.send(JSON.stringify({ type: "frame", kind, reason }));
+    sock.send(JSON.stringify({ type: "frame", kind, reason, seq: trackRef.current?.seq.current }));
     sock.send(blob);
   };
 
@@ -36,7 +51,10 @@ export function PhonePage({ sessionId }: { sessionId: string }) {
     sock.onmessage = (ev) => {
       if (typeof ev.data !== "string") return;
       const msg = JSON.parse(ev.data);
-      if (msg.type === "capture") {
+      if (msg.type === "track_id") setTrackId(msg.id);
+      else if (msg.type === "follow") trackRef.current.follow(msg.box, msg.seq);
+      else if (msg.type === "unfollow") trackRef.current.unfollow();
+      else if (msg.type === "capture") {
         const v = videoRef.current;
         const f = v && (sampler.current ??= new FrameSampler()).sample(v);
         if (f) detector.current.markChecked(f);
@@ -54,12 +72,12 @@ export function PhonePage({ sessionId }: { sessionId: string }) {
       const f = (sampler.current ??= new FrameSampler()).sample(v);
       if (!f) return;
       const r = detector.current.push(f);
-      const next = STATE_LABEL[r.state];
+      const next = track.live && track.last ? PHASE_LABEL[track.last.phase] : STATE_LABEL[r.state];
       if (next !== label) {
         setLabel(next);
         ws.current?.readyState === WebSocket.OPEN && ws.current.send(JSON.stringify({ type: "state", label: next }));
       }
-      if (r.trigger) send("check", r.trigger);
+      if (r.trigger && stillTriggerAllowed(track.live, r.trigger)) send("check", r.trigger);
     },
     250,
     ready && linked === "linked",

@@ -5,8 +5,9 @@ import { TutorBar } from "../components/TutorBar";
 import { createSession, socketUrl } from "../lib/api";
 import type { Trigger } from "../lib/changeDetect";
 import { useTutor } from "../lib/useTutor";
+import { useFollowedResult, type TrackMessage } from "../lib/tracking";
 
-type Header = { type: "frame"; kind: "preview" | "check"; reason?: Trigger | "manual" };
+type Header = { type: "frame"; kind: "preview" | "check"; reason?: Trigger | "manual" | "line_done"; seq?: number };
 
 /** Laptop side of phone mode: show a QR, then the phone's view of the page. */
 export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
@@ -20,7 +21,15 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
   const [setupError, setSetupError] = useState<string | null>(null);
   const ws = useRef<WebSocket | null>(null);
   const lastFrame = useRef<Blob | null>(null);
-  const tutor = useTutor(async () => lastFrame.current);
+  const [trackId] = useState(() => `phone-${Math.random().toString(36).slice(2, 10)}`);
+  const tutor = useTutor(async () => lastFrame.current, trackId);
+  // The phone tracks the page live (SAM 3.1) and forwards its events here.
+  const [track, setTrack] = useState<{ msg: TrackMessage; at: number } | null>(null);
+  const [checkSeq, setCheckSeq] = useState<number | null>(null);
+  const trackLive = !!track && performance.now() - track.at < 3000;
+  const toPhone = (m: object) => ws.current?.readyState === WebSocket.OPEN && ws.current.send(JSON.stringify(m));
+  const shown = useFollowedResult(tutor.result, checkSeq, (box, seq) => toPhone({ type: "follow", box, seq }),
+    () => toPhone({ type: "unfollow" }), track?.msg.follow?.finding?.box ?? null, trackLive);
 
   useEffect(() => {
     let closed = false;
@@ -39,6 +48,7 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
           if (typeof ev.data === "string") {
             const msg = JSON.parse(ev.data);
             if (msg.type === "phone_connected") {
+              sock.send(JSON.stringify({ type: "track_id", id: trackId }));
               setConnected(true);
               const secs = (performance.now() - started) / 1000;
               setPairedIn(secs);
@@ -46,11 +56,15 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
             } else if (msg.type === "phone_disconnected") setConnected(false);
             else if (msg.type === "frame") header = msg;
             else if (msg.type === "state") setPhoneState(msg.label);
+            else if (msg.type === "track") setTrack({ msg, at: performance.now() });
             return;
           }
           const blob = ev.data as Blob;
           lastFrame.current = blob;
-          if (header?.kind === "check") tutor.check(blob, header.reason ?? "manual");
+          if (header?.kind === "check") {
+            setCheckSeq(header.seq ?? null);
+            tutor.check(blob, header.reason ?? "manual");
+          }
           const url = URL.createObjectURL(blob);
           if (lastUrl) URL.revokeObjectURL(lastUrl);
           lastUrl = url;
@@ -96,7 +110,7 @@ export function PhoneScreenMode({ onExit }: { onExit: () => void }) {
           <div className="media-empty">Waiting for the phone camera…</div>
         )
       }
-      result={tutor.result}
+      result={shown}
       status={tutor.note ?? (phoneState || `Phone connected${pairedIn ? ` in ${pairedIn.toFixed(1)} s` : ""}`)}
       busy={tutor.busy}
       error={tutor.error}
