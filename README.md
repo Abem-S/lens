@@ -51,6 +51,8 @@ Live checks for the GPU and voice nodes (they cost a little GPU time), run from 
 
 ```sh
 uv run --extra gpu --extra eval python scripts/c1_check.py   # SAM: step-box masks, fingertips, latency
+uv run python scripts/make_track_clip.py PAGE.png HAND.png CLIP/ --drift   # synthetic tracking clip + truth
+uv run --extra gpu python scripts/track_check.py CLIP/        # SAM 3.1 live tracking: latency, events, outline follow
 uv run --extra gpu python scripts/v1_check.py                # ASR + TTS round trip, latency
 uv run --extra gpu python scripts/v2_check.py                # needs `make serve`: first-audio latency, barge-in
 uv run python scripts/a4_check.py                            # hints on planted mistakes + independent leak audit
@@ -70,13 +72,15 @@ backend/src/lens/
   pipeline.py         read -> check -> re-read to confirm -> hint -> outline (shared by API, tutor, eval)
   hints.py        A4  Socratic hint writer + answer-leak guardrail
   pointing.py     C2  fingertip -> step, outlines
-  sam.py          C1  client for the SAM service on Modal (modal_apps/sam.py)
+  sam.py          C1  client for the SAM still-frame service on Modal (modal_apps/sam.py)
+  tracking.py     C1/C2 live SAM 3.1 tracking (modal_apps/sam31.py): relay, writing / pointing / line_done events
   voice.py        V1  client for ASR + TTS on Modal (modal_apps/voice.py)
   tutor.py        F1/V2 tutor session: conversation, spoken hints, barge-in, pointing
   eval/           E0 loaders, A5 harness (`lens-eval`)
   app.py          API, phone pairing + frame relay, serves the built frontend
 frontend/src/
-  lib/changeDetect.ts   D1  new-ink / hand-clear detection (decides when to call Spark)
+  lib/tracking.ts       D1  live tracking client: checks on line_done, outlines follow the page
+  lib/changeDetect.ts   D1  new-ink / hand-clear detection (fallback trigger when tracking is off)
   lib/vad.ts, audio.ts  V2  speech detection, mic capture, playback with barge-in
   lib/useTutor.ts       F1  the tutor session in the browser
   modes/                D1  webcam, phone (QR pairing + capture), demo
