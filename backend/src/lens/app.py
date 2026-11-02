@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from lens.config import REPO_ROOT, Settings
+from lens.tracking import mount as mount_tracking
 
 log = logging.getLogger("lens.app")
 SESSION_TTL_S = 6 * 3600
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Muna Lens")
     sessions: dict[str, PairSession] = {}
     state: dict = {}
+    track_hub = mount_tracking(app, settings)  # /ws/track: live SAM 3.1 tracking (lens/tracking.py)
 
     def spark():
         if "spark" not in state:
@@ -210,6 +212,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     data = json.loads(msg["text"])
                     kind = data.get("type")
                     if kind == "hello":
+                        # A live tracking session already knows where the student points.
+                        services.locate_fingertip = track_hub.locator(data.get("track"), services.locate_fingertip)
                         session.voice = bool(data.get("voice", True)) and voice is not None
                         await ws.send_json({"type": "ready", "voice": session.voice, "voice_available": voice is not None,
                                             "pointing": services.locate_fingertip is not None})
