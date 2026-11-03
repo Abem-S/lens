@@ -85,6 +85,105 @@ function dilate(m: Uint8Array, w: number, h: number): Uint8Array {
   return out;
 }
 
+/** `m` moved by (dx, dy) pixels; what moves in from outside is empty. */
+export function shifted(m: Uint8Array, w: number, h: number, dx: number, dy: number): Uint8Array {
+  if (!dx && !dy) return m;
+  const out = new Uint8Array(m.length);
+  for (let y = Math.max(0, dy); y < Math.min(h, h + dy); y++)
+    for (let x = Math.max(0, dx); x < Math.min(w, w + dx); x++) out[y * w + x] = m[(y - dy) * w + (x - dx)];
+  return out;
+}
+
+/** The shift (within ±r px) that lays `base` best over `ink`: a hand-held page or phone
+ * drifts a little between looks, and drifted ink is not new ink. */
+export function bestShift(base: Uint8Array, ink: Uint8Array, w: number, h: number, r = 4): [number, number] {
+  const pts: number[] = [];
+  for (let i = 0; i < base.length; i++) if (base[i]) pts.push(i);
+  let best: [number, number] = [0, 0];
+  let bestN = -1;
+  for (let dy = -r; dy <= r; dy++)
+    for (let dx = -r; dx <= r; dx++) {
+      let n = 0;
+      for (const i of pts) {
+        const x = (i % w) + dx, y = ((i / w) | 0) + dy;
+        if (x >= 0 && x < w && y >= 0 && y < h && ink[y * w + x]) n++;
+      }
+      // Prefer no shift on a tie, so a still page stays exactly as compared before.
+      if (n > bestN || (n === bestN && Math.abs(dx) + Math.abs(dy) < Math.abs(best[0]) + Math.abs(best[1]))) {
+        best = [dx, dy];
+        bestN = n;
+      }
+    }
+  return best;
+}
+
+/** How the page sits now relative to the last check: a small turn (degrees, about the
+ * frame centre) and then a shift (pixels). */
+export interface Pose {
+  angle: number;
+  dx: number;
+  dy: number;
+}
+
+// A hand-held notebook tilts as well as drifts; a turn of a degree or two moves the ink at
+// the edge of a 160 px frame by several pixels, which a shift alone cannot undo.
+export const POSE_ANGLES = [0, -0.75, 0.75, -1.5, 1.5, -2.25, 2.25, -3, 3];
+
+/** The turn (within ±3°) and shift (within ±r px) that lay `base` best over `ink`. */
+export function bestPose(base: Uint8Array, ink: Uint8Array, w: number, h: number, r = 4): Pose {
+  const xs: number[] = [], ys: number[] = [];
+  for (let i = 0; i < base.length; i++)
+    if (base[i]) {
+      xs.push(i % w);
+      ys.push((i / w) | 0);
+    }
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  let best: Pose = { angle: 0, dx: 0, dy: 0 };
+  let bestN = -1;
+  const rx = new Int32Array(xs.length), ry = new Int32Array(xs.length);
+  for (const angle of POSE_ANGLES) {
+    const c = Math.cos((angle * Math.PI) / 180), s = Math.sin((angle * Math.PI) / 180);
+    for (let k = 0; k < xs.length; k++) {
+      const x = xs[k] - cx, y = ys[k] - cy;
+      rx[k] = Math.round(cx + c * x - s * y);
+      ry[k] = Math.round(cy + s * x + c * y);
+    }
+    for (let dy = -r; dy <= r; dy++)
+      for (let dx = -r; dx <= r; dx++) {
+        let n = 0;
+        for (let k = 0; k < rx.length; k++) {
+          const x = rx[k] + dx, y = ry[k] + dy;
+          if (x >= 0 && x < w && y >= 0 && y < h && ink[y * w + x]) n++;
+        }
+        // A turn must clearly beat no turn (2 % more ink laid over), so a still page stays as it was.
+        const cost = Math.abs(angle) > 0 ? Math.max(1, Math.round(0.02 * xs.length)) : 0;
+        const score = n - cost;
+        const tieBetter = Math.abs(angle) + Math.abs(dx) + Math.abs(dy) <
+          Math.abs(best.angle) + Math.abs(best.dx) + Math.abs(best.dy);
+        if (score > bestN || (score === bestN && tieBetter)) {
+          best = { angle, dx, dy };
+          bestN = score;
+        }
+      }
+  }
+  return best;
+}
+
+/** `m` turned by `pose.angle` about the frame centre, then moved by (dx, dy). */
+export function posed(m: Uint8Array, w: number, h: number, pose: Pose): Uint8Array {
+  if (!pose.angle) return shifted(m, w, h, pose.dx, pose.dy);
+  const out = new Uint8Array(m.length);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  const c = Math.cos((pose.angle * Math.PI) / 180), s = Math.sin((pose.angle * Math.PI) / 180);
+  for (let i = 0; i < m.length; i++) {
+    if (!m[i]) continue;
+    const x = (i % w) - cx, y = ((i / w) | 0) - cy;
+    const nx = Math.round(cx + c * x - s * y) + pose.dx, ny = Math.round(cy + s * x + c * y) + pose.dy;
+    if (nx >= 0 && nx < w && ny >= 0 && ny < h) out[ny * w + nx] = 1;
+  }
+  return out;
+}
+
 function onlyIn(a: Uint8Array, notNear: Uint8Array): number {
   let n = 0;
   for (let i = 0; i < a.length; i++) if (a[i] && !notNear[i]) n++;
@@ -151,14 +250,51 @@ export class ChangeDetector {
       this.armed = false;
       return result("steady", o.triggerOnFirstView ? "first_view" : null);
     }
-    const added = onlyIn(ink, dilate(this.baseline, f.width, f.height));
-    const removed = onlyIn(this.baseline, dilate(ink, f.width, f.height));
+    const base = posed(this.baseline, f.width, f.height, bestPose(this.baseline, ink, f.width, f.height));
+    const added = onlyIn(ink, dilate(base, f.width, f.height));
+    const removed = onlyIn(base, dilate(ink, f.width, f.height));
     this.armed = false; // look once per quiet spell
+    // Most of the checked page's ink is gone and little came instead: the page left
+    // the view (a notebook lowered to write, a phone lifted away). Nothing to read;
+    // keep the baseline so the page coming back with a new line is new ink.
+    let baseInk = 0;
+    for (const v of this.baseline) baseInk += v;
+    baseInk /= this.baseline.length;
+    if (baseInk > o.inkThreshold && removed > 0.6 * baseInk && added < 0.5 * baseInk) return result("steady", null, added);
     let trigger: Trigger | null = null;
     if (added > o.pageChangeThreshold || removed > o.pageChangeThreshold) trigger = "page_changed";
     else if (added > o.inkThreshold) trigger = "new_ink";
     else if (removed > o.inkThreshold) trigger = "ink_removed";
     if (trigger) this.baseline = ink;
     return result("steady", trigger, added);
+  }
+}
+
+/** The student's live state for the tutor when live tracking is off, from the detector:
+ * movement over the page reads as "writing", stillness as "paused", and a page that has
+ * been still for `awayAfterMs` as "away" (nobody is working at it). */
+export type Activity = "writing" | "paused" | "away";
+
+export class ActivityTracker {
+  private lastMove: number | null = null;
+  constructor(private awayAfterMs = 20_000) {}
+
+  update(state: DetectorState, nowMs: number): Activity {
+    if (state === "moving" || state === "hand") {
+      this.lastMove = nowMs;
+      return "writing";
+    }
+    return this.lastMove !== null && nowMs - this.lastMove < this.awayAfterMs ? "paused" : "away";
+  }
+
+  private sent: { phase: Activity; at: number } | null = null;
+
+  /** The phase to send to the tutor now, or null: on every change, and every `everyMs` as a
+   * heartbeat (the server stops trusting a report after a few seconds). */
+  report(state: DetectorState, nowMs: number, everyMs = 2000): Activity | null {
+    const phase = this.update(state, nowMs);
+    if (this.sent && this.sent.phase === phase && nowMs - this.sent.at < everyMs) return null;
+    this.sent = { phase, at: nowMs };
+    return phase;
   }
 }

@@ -95,3 +95,20 @@ def test_pointer_tip_uses_the_hand_and_extends_along_a_held_pen():
     _, y = pointer_tip(seg({"hand": [hand], "pen": [stray_pen]}), b"img")
     assert abs(y * 400 - 250) <= 3  # a pen not in the hand is ignored
     assert pointer_tip(seg({}), b"img") is None
+
+
+def test_step_mask_keeps_the_boxed_step_not_a_lookalike():
+    """SAM 3 returns every line like the boxed one, best-scored first; the outline must be the boxed one."""
+    from lens.pointing import step_mask
+
+    H, W = 100, 200
+    box = (0.1, 0.5, 0.6, 0.1)  # the step: rows 50-60
+    other = np.zeros((H, W), bool)
+    other[20:30, 20:140] = True  # a neighbour that looks alike (SAM's top score)
+    mine = np.zeros((H, W), bool)
+    mine[51:59, 22:138] = True
+    mine[59:90, 30:40] = True  # a descender running into the next line: trimmed
+    got = step_mask([other, mine], box)
+    assert got is not None and got[55, 60] and not got[25, 60] and not got[85, 35]
+    assert step_mask([other], box) is None  # nothing inside the box: the box outline is used
+    assert step_mask([], box) is None

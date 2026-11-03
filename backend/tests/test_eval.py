@@ -134,6 +134,25 @@ def test_held_out_sample_is_disjoint_from_the_tuning_one(tmp_path):
     assert sum(int(i[1:]) % 2 == 0 for i in held) == 5  # still balanced
 
 
+def test_mislabelled_pages_are_scored_apart_and_traces_saved():
+    from lens.eval.loaders import FERMAT_LABEL_ERRORS
+
+    assert "img_296_pert_5.3" in FERMAT_LABEL_ERRORS
+    items = [item(0, "disputed"), item(1, "disputed"), item(2, "none")]
+    preds = iter([page_with_error(0), page_with_error(None), page_with_error(None)])
+    saved = []
+
+    def pipeline(img, prob, trace=None):
+        trace["seen"] = True
+        return next(preds)
+
+    s = run(items, pipeline, record=lambda it, page, f, outcome, trace: saved.append((outcome, trace)))["own"]
+    assert (s.disputed_flagged, s.disputed_quiet, s.false_alarms, s.clean_ok) == (1, 1, 0, 1)
+    assert s.false_alarm_rate == 0 and s.summary()["raw_false_alarms"] == 1
+    assert [o for o, _ in saved] == ["disputed_flagged", "disputed_quiet", "clean_ok"]
+    assert all(t == {"seen": True} for _, t in saved)
+
+
 def test_reading_similarity_ignores_latex_markup():
     page = Page(steps=[Step(id="s1", latex="V = I R"), Step(id="s2", latex="\\text{so } I = 2")])
     assert reading_similarity(page, "$V = IR$\n\nso $I = 2$") == pytest.approx(1.0)

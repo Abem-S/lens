@@ -114,6 +114,17 @@ def test_hands_holding_the_notebook_are_not_pointing():
     assert events(outs, "line_done") == []
 
 
+def test_hub_remembers_the_last_finished_line_for_a_while():
+    hub = TrackHub(line_age_s=10)
+    assert hub.last_line("t1") is None
+    hub.line_done("t1", [0.1, 0.5, 0.4, 0.06])
+    assert hub.last_line("t1") == (0.1, 0.5, 0.4, 0.06) and hub.last_line("t2") is None
+    hub.line_age_s = 0
+    assert hub.last_line("t1") is None
+    hub.drop("t1")
+    assert hub.last_line("t1") is None
+
+
 def test_hub_prefers_a_fresh_tracked_pointer():
     hub = TrackHub(max_age_s=10)
     asked = []
@@ -122,6 +133,26 @@ def test_hub_prefers_a_fresh_tracked_pointer():
     hub.update("t1", [0.5, 0.4])
     assert locate(b"img") == (0.5, 0.4) and len(asked) == 1
     assert hub.locator(None, None) is None
+
+
+def test_hub_live_state_for_the_tutor(monkeypatch):
+    from lens import tracking
+
+    now = [100.0]
+    monkeypatch.setattr(tracking.time, "monotonic", lambda: now[0])
+    hub = TrackHub(live_age_s=3.0, present_hold_s=3.0)
+    assert hub.live("t1") is None  # no tracking: unknown
+    hub.update("t1", [0.5, 0.5], "writing", seen=True)
+    assert hub.live("t1") == {"phase": "writing", "present": True, "writing_ago_s": 0.0}
+    now[0] += 1
+    hub.update("t1", None, "clear", seen=True)  # hands holding the page at its edges
+    assert hub.live("t1")["phase"] == "paused" and hub.live("t1")["writing_ago_s"] == 1.0
+    for _ in range(4):
+        now[0] += 1
+        hub.update("t1", None, "clear", seen=False)  # nobody there
+    assert hub.live("t1")["phase"] == "away" and not hub.live("t1")["present"]
+    now[0] += 5
+    assert hub.live("t1") is None  # tracking stopped answering
 
 
 def _settings():
@@ -186,6 +217,7 @@ def test_relay_turns_gpu_tracks_into_events(monkeypatch):
     monkeypatch.setattr("lens.tracking._now", _Clock())
     phases, done = [], []
     with TestClient(create_app(_settings())).websocket_connect("/ws/track?id=t") as ws:
+        assert ws.receive_json()["type"] == "connecting"  # a cold start can take a while
         assert ws.receive_json()["type"] == "ready"
         for i in range(22):
             ws.send_bytes(i.to_bytes(4, "big") + b"jpeg")

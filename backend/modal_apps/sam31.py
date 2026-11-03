@@ -226,9 +226,10 @@ class Follow:
     gpu=["L40S", "A100"],
     volumes={"/cache": cache},
     secrets=[modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", ""), "LENS_TRACK_TOKEN": _track_token()})],
-    scaledown_window=60,  # GPU only while someone is tracking; idle containers go quickly
+    scaledown_window=60,  # GPU only while someone is tracking (must match lens.warm.SCALEDOWN_S)
     timeout=3600,
     max_containers=2,
+    region="us-east",  # same region as muna-lens-web, which relays every frame here
 )
 @modal.concurrent(max_inputs=4)
 class Tracker:

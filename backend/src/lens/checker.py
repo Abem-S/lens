@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import cmath
 import random
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import pairwise
@@ -33,6 +34,7 @@ Verdict = Literal["ok", "error", "unknown"]
 ModelJudge = Callable[[Page, list[str]], tuple[str | None, str]]
 
 _SAMPLES = 6
+_INVERSE_TRIG = (sp.asin, sp.acos, sp.atan, sp.acot, sp.asec, sp.acsc)
 _TOL = 1e-8
 
 
@@ -90,6 +92,10 @@ def equivalent(a: sp.Expr, b: sp.Expr, *, up_to_constant_in: sp.Symbol | None = 
         else:
             disagree += 1
     if disagree >= 2 and agree == 0:
+        # sin^-1(sin 2t) = 2t holds only where the inverse is taken (|2t| <= pi/2); the
+        # sample points lie outside it. With an inverse trig function, never claim.
+        if diff.has(*_INVERSE_TRIG):
+            return None
         return False
     if agree >= 3 and disagree == 0:
         return True
@@ -254,6 +260,8 @@ def _close_numbers(a: sp.Expr, b: sp.Expr, decimals: int) -> bool | None:
         va, vb = complex(a.evalf(30)), complex(b.evalf(30))
     except (TypeError, ValueError):
         return None
+    if not all(cmath.isfinite(v) for v in (va, vb)):
+        return None  # a division by zero is a misreading (or no claim at all), not a wrong value
     if abs(va.imag) > 1e-12 or abs(vb.imag) > 1e-12:
         return None
     va, vb = va.real, vb.real
@@ -310,6 +318,10 @@ def _expr_kind(a: sp.Expr, b: sp.Expr) -> str:
 
 # ---------- a pair of lines ----------
 
+def _symbols(m: StepMath) -> set[sp.Symbol]:
+    return set().union(*(x.free_symbols for x in m.sides)) if m.sides else set()
+
+
 def check_pair(prev: StepMath | None, cur: StepMath) -> StepResult:
     if cur.kind == "unparseable":
         return StepResult("unknown", by=None)
@@ -364,6 +376,46 @@ def check_pair(prev: StepMath | None, cur: StepMath) -> StepResult:
     return StepResult("unknown")
 
 
+# Instruction words in front of the equation ("Solve", "Find x if"), not maths. A fixed
+# list, because a function name ("sin x = 1/2") must stay part of the equation.
+_INSTRUCTION = (r"solve|find|simplify|evaluate|compute|calculate|determine|show|prove|given|if|let|"
+                r"for|the|value|values|of|that|when|where|[a-z](?=\s+(?:if|when|where|given)\b)")
+_PROBLEM_WORDS = re.compile(r"^(\\text\{[^{}]*\}|[A-Za-z][A-Za-z ,]*:|(?:(?:" + _INSTRUCTION + r")\b[\s,]*)+(?=[^=]*=))\s*",
+                            re.IGNORECASE)
+
+
+def problem_equation(problem: str | None) -> StepMath | None:
+    """The problem's equation, when it states exactly one ("Solve: 2x + 5 = 11"), so
+    the first line is checked against it. A system, a list or anything unclear gives
+    None: comparing a line with half of a system would be a false alarm."""
+    if not problem:
+        return None
+    text = problem.strip()
+    while (m := _PROBLEM_WORDS.match(text)) and m.end() > 0:
+        text = text[m.end():]
+    if not text or re.search(r"\\text|\\\\|\band\b|;", text):
+        return None
+    eq = analyse(text)
+    return eq if eq.kind == "equation" and len(eq.variants) == 1 else None
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"\\text|[\s{}$]", "", text).lower()
+
+
+def restates_problem(latex: str, problem: str | None) -> bool:
+    """The question copied onto the page ("2x+5y=13 x+2y=7" under "Solve the system...").
+    It is not the student's working, so it is not checked: read as one line, a system
+    looks like a broken chain."""
+    line = _squash(latex)
+    return bool(problem) and "=" in line and len(line) >= 5 and line in _squash(problem)
+
+
+_LONE_OPERATOR = re.compile(r"^\s*\$?\s*(\+|-|\\times|\\pm|\\text\{\s*[+-]\s*\})\s*\$?\s*$")
+# A line that starts with a multiplying or adding operator and has more after it.
+_GOES_ON = re.compile(r"^\s*\$?\s*(\\times|\\cdot|\\div|\+|\*)\s*\S")
+
+
 def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Finding | None]:
     """Mark every step and return the first verified error, if any."""
     analysed = [analyse(s.latex) for s in page.steps]
@@ -371,12 +423,32 @@ def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Findi
     # is compared with the maths above it.
     connector = [is_connector(s.latex) for s in page.steps]
     prevs: list[StepMath | None] = []
+    # The first equation is checked against the problem's equation, when the problem
+    # states one in the same unknowns (a substitution like "u = x^2" starts a new thread).
+    given = problem_equation(page.problem)
+    first = next((a for a, c in zip(analysed, connector) if not c), None)
     last: StepMath | None = None
+    if given and first and first.kind == "equation" and _symbols(first) and _symbols(first) <= _symbols(given):
+        last = given
     for i, cur in enumerate(analysed):
         prevs.append(last)
         if not connector[i]:
             last = cur
     results = [check_pair(prevs[i], cur) for i, cur in enumerate(analysed)]
+    copied = {i for i, s in enumerate(page.steps) if restates_problem(s.latex, page.problem)}
+    for i in copied:
+        results[i] = StepResult("unknown")
+    # A line that goes on in the next one ("13824 = 2 x 2 x ... x 3" / "x 3"): read on its
+    # own it is unfinished, so SymPy cannot call it wrong.
+    for i in range(len(analysed) - 1):
+        if results[i].verdict == "error" and _GOES_ON.match(page.steps[i + 1].latex):
+            results[i] = StepResult("unknown")
+    # Column arithmetic: rows written one under another with a lone "+" between them,
+    # and their total below. The total is not the row above it continued.
+    for i, cur in enumerate(analysed):
+        if (results[i].verdict == "error" and cur.kind == "expression" and not cur.continuation
+                and any(_LONE_OPERATOR.match(s.latex) for s in page.steps[max(0, i - 3):i])):
+            results[i] = StepResult("unknown")
     # Wordy lines can still hold plain arithmetic ("so the total is 8 x 2.5 = 18 kg"):
     # SymPy checks that part, and only a mismatch counts (a match proves nothing else).
     for i, cur in enumerate(analysed):
@@ -389,7 +461,8 @@ def check_page(page: Page, judge: ModelJudge | None = None) -> tuple[Page, Findi
     # Lines SymPy could not decide go to the model: lines it cannot parse, and parsed
     # lines it could not settle (values substituted from the question, a new thread).
     # Only those before the first SymPy-verified error (we report the first mistake only).
-    candidates = [page.steps[i].id for i in range(first_sympy_error) if results[i].verdict == "unknown"]
+    candidates = [page.steps[i].id for i in range(first_sympy_error)
+                  if results[i].verdict == "unknown" and i not in copied]
     if judge is not None and candidates:
         flagged, kind = judge(page, candidates)
         flagged_at = next((i for i, s in enumerate(page.steps) if s.id == flagged and s.id in candidates), None)

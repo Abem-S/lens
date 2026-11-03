@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Protocol
 
 from lens.contract import Page, Step
+from lens.lines import snap_steps
 from lens.spark import PAGE_MAX_TOKENS, Reply, image_part, text_part
+
+log = logging.getLogger("lens.reader")
 
 READ_PROMPT = """You are reading a photo of a student's handwritten STEM work.
 
@@ -110,16 +114,42 @@ def shrink(image: bytes, max_side: int = MAX_SIDE) -> tuple[bytes, str]:
     return buf.getvalue(), "image/jpeg"
 
 
-def read_page(spark: Asks, image: bytes, mime: str = "image/jpeg", effort: str = "low") -> Page:
-    """Call Spark once; retry once with a nudge if the reply is not valid JSON."""
+def read_page(spark: Asks, image: bytes, mime: str = "image/jpeg", effort: str = "low", snap: bool = True) -> Page:
+    """Call Spark once; retry once with a nudge if the reply is not valid JSON.
+
+    snap: replace Spark's rough step boxes with the handwritten lines found in the
+    ink (lens.lines). The ink is analysed while Spark is reading, so it adds no time."""
+    from concurrent.futures import ThreadPoolExecutor
+
     image, mime = shrink(image)
-    content = [text_part(READ_PROMPT), image_part(image, mime)]
-    reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page", json_mode=True,
-                      **_hedge(spark))
+    pool = ThreadPoolExecutor(max_workers=1) if snap else None
+    lines = pool.submit(_ink_lines, image) if pool else None
     try:
-        return parse_page(reply.text)
-    except ReadError:
-        content.append(text_part("Your last reply was not valid JSON. Reply with the JSON object only."))
-        reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page_retry",
-                          json_mode=True, **_hedge(spark))
-        return parse_page(reply.text)
+        content = [text_part(READ_PROMPT), image_part(image, mime)]
+        reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page", json_mode=True,
+                          **_hedge(spark))
+        try:
+            page = parse_page(reply.text)
+        except ReadError:
+            content.append(text_part("Your last reply was not valid JSON. Reply with the JSON object only."))
+            reply = spark.ask(content, effort=effort, max_tokens=PAGE_MAX_TOKENS, purpose="read_page_retry",
+                              json_mode=True, **_hedge(spark))
+            page = parse_page(reply.text)
+        if lines is not None:
+            found = lines.result()
+            if found:
+                page.steps = snap_steps(page.steps, found)
+        return page
+    finally:
+        if pool:
+            pool.shutdown(wait=False)
+
+
+def _ink_lines(image: bytes) -> list:
+    from lens.lines import find_lines
+
+    try:
+        return find_lines(image)
+    except Exception:
+        log.exception("ink line detection failed; keeping Spark's boxes")
+        return []

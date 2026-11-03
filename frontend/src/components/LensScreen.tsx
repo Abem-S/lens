@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import type { CheckResult } from "../contract";
 import { PageView } from "./PageView";
-import { StepsPanel } from "./StepsPanel";
 
 interface Props {
   aspect: number;
@@ -10,17 +9,26 @@ interface Props {
   status: string;
   busy?: boolean;
   error?: string | null;
-  onCheck?: () => void;
   onExit?: () => void;
   extra?: ReactNode;
   pointingStep?: string | null;
+  actions?: ReactNode; // top bar buttons (accessibility, end session)
+  onReadAloud?: () => void; // "read my page aloud"
+  /** A banner about the connection or a limit (reconnecting, access expired, today's cap…). */
+  notice?: string | null;
+  /** Set while Lens rests (idle or hidden tab): shown over the page, with a button to carry on. */
+  resting?: string | null;
+  onWake?: () => void;
 }
 
-/** D2: live page, outline on the mistake, tutor pointer, steps panel. */
-export function LensScreen({ aspect, media, result, status, busy, error, onCheck, onExit, extra, pointingStep }: Props) {
+/** D2: live page, outline on the mistake, tutor pointer. No list of the steps read: the student has
+ * their paper, and a list of raw readings only showed misreads (owner's test, 2026-11-03). */
+export function LensScreen({
+  aspect, media, result, status, busy, error, onExit, extra, pointingStep, actions, onReadAloud,
+  notice, resting, onWake,
+}: Props) {
   const page = result?.page ?? null;
   const finding = result?.finding ?? null;
-  const allOk = page && page.steps.length > 0 && !finding;
   return (
     <div className="lens">
       <header className="lens-bar">
@@ -30,18 +38,30 @@ export function LensScreen({ aspect, media, result, status, busy, error, onCheck
         <span className={`status${busy ? " status-busy" : ""}`} role="status">
           {status}
         </span>
+        {actions && <div className="bar-actions">{actions}</div>}
       </header>
+      {notice && (
+        <p className="notice" role="alert">
+          {notice}
+        </p>
+      )}
       <main className="lens-main">
-        <PageView aspect={aspect} page={page} finding={finding} pointingStep={pointingStep}>
-          {media}
-        </PageView>
-        <aside className="panel">
-          {page?.problem && (
-            <section>
-              <h2>Working on</h2>
-              <p className="problem">{page.problem}</p>
-            </section>
+        <div className="page-wrap">
+          <PageView aspect={aspect} page={page} finding={finding} pointingStep={pointingStep} outline={result?.outline}>
+            {media}
+          </PageView>
+          {resting && (
+            <div className="resting" role="status">
+              <p>{resting}</p>
+              {onWake && (
+                <button className="primary" onClick={onWake}>
+                  I'm here
+                </button>
+              )}
+            </div>
           )}
+        </div>
+        <aside className="panel">
           {extra}
           {finding && (
             <section className="hint" aria-live="polite">
@@ -49,16 +69,9 @@ export function LensScreen({ aspect, media, result, status, busy, error, onCheck
               <p data-testid="hint">{finding.hint}</p>
             </section>
           )}
-          {allOk && <p className="all-ok">Every line checks out so far.</p>}
           {error && <p className="error-note">{error}</p>}
-          <section>
-            <h2>Lines</h2>
-            <StepsPanel page={page} finding={finding} />
-          </section>
-          {onCheck && (
-            <button className="primary" onClick={onCheck} disabled={busy}>
-              {busy ? "Reading…" : "Check my work"}
-            </button>
+          {onReadAloud && page && page.steps.length > 0 && (
+            <button className="link-btn" onClick={onReadAloud}>Read my page aloud</button>
           )}
         </aside>
       </main>

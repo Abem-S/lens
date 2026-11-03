@@ -33,7 +33,7 @@ app = modal.App(APP_NAME)
     gpu=["L4", "A10G", "L40S"],  # first free one wins
     volumes={"/cache": cache},
     secrets=[modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})],
-    scaledown_window=120,
+    scaledown_window=90,  # must match lens.warm.SCALEDOWN_S; nothing ever pins a container up
     timeout=600,
 )
 class Sam:

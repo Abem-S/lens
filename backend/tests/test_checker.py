@@ -211,3 +211,128 @@ def test_numeric_claims_are_checked(lines, wrong):
     checked, finding = check_page(page(*lines))
     assert finding is not None and finding.step_id == f"s{wrong + 1}", (lines, finding)
     assert checked.steps[wrong].verified_by == "sympy"
+
+
+# ---- the first line is checked against the problem's own equation ----
+
+def _first(problem, *lines):
+    from lens.checker import check_page
+    from lens.contract import Page, Step
+
+    page = Page(problem=problem, steps=[Step(id=f"s{i}", latex=l, bbox=(0, 0, 1, 0.1)) for i, l in enumerate(lines)])
+    return check_page(page)
+
+
+def test_first_line_is_checked_against_the_problem():
+    page, finding = _first(r"\text{Solve: }2x + 5 = 11", "2x = 11 + 5", "2x = 16", "x = 8")
+    assert finding is not None and finding.step_id == "s0" and page.steps[0].verified_by == "sympy"
+
+
+def test_correct_first_line_passes_against_the_problem():
+    page, finding = _first("Solve: 2x + 5 = 11", "2x = 11 - 5", "2x = 6", "x = 3")
+    assert finding is None and page.steps[0].status == "ok"
+
+
+def test_a_system_in_the_problem_is_not_used():
+    _, finding = _first(r"2x + 5y = 13, \; x + 2y = 7", "x = 7 - 2y", "2(7 - 2y) + 5y = 13")
+    assert finding is None
+
+
+def test_a_substitution_starts_a_new_thread():
+    _, finding = _first("x^4 - 5x^2 + 4 = 0", "u = x^2", "u^2 - 5u + 4 = 0")
+    assert finding is None
+
+
+def test_no_problem_means_no_extra_check():
+    _, finding = _first(None, "2x = 11 + 5", "2x = 16")
+    assert finding is None
+
+
+def test_problem_phrasings():
+    from lens.checker import problem_equation as pe
+
+    def sides(t):
+        e = pe(t)
+        return e and [str(x) for x in e.sides]
+
+    assert sides("Solve 2x + 5 = 11") == ["2*x + 5", "11"]
+    assert sides(r"\text{Solve: }2x + 5 = 11") == ["2*x + 5", "11"]
+    assert sides("Find x if 3x - 2 = 7") == ["3*x - 2", "7"]
+    assert sides("Solve for x: 2x+1=5") == ["2*x + 1", "5"]
+    assert sides("x + 5 = 11") == ["x + 5", "11"]  # a leading variable is maths, not a word
+    assert sides(r"\sin x = \frac{1}{2}") == ["sin(x)", "1/2"]  # a function name stays
+    assert pe(r"2x + 5y = 13, \; x + 2y = 7") is None  # a system is never used
+
+
+# ---------- two readings of one line (lens.mathparse.same_math) ----------
+
+@pytest.mark.parametrize("a, b", [
+    ("2x + 5 = 11", "2x+5=11"),
+    ("= 1960000 + 9 - 8400", "=1960000 - 8400 + 9"),  # same value, terms in another order
+    ("Area = d_1 . d_2 = 240", "Area = d_{1} \\cdot d_{2} = 240"),
+    ("\\text{are } \\sqrt{\\frac{3}{2}}", "are $\\sqrt{\\frac{3}{2}}$"),
+    ("\\frac{5-2x}{3} \\leq \\frac{x}{6} -5", "\\frac{5-2x}{3} \\le \\frac{x}{6} -5"),
+    ("\\text{we divide }1188\\text{ by }2\\times 2\\times 11 = 42", "\\text{we divide 1188 by 2 \\times 2 \\times 11= 42}"),
+])
+def test_same_math_reads_alike(a, b):
+    from lens.mathparse import same_math
+
+    assert same_math(a, b)
+
+
+@pytest.mark.parametrize("a, b", [
+    ("= 1960000 - 8200 + 9", "= 1960000 - 8400 + 9"),
+    ("-(5x^2 - 4y^2 + 6y - 3)", "-(5x^2 - 4y^2 + 6y - 32)"),
+    ("\\text{mean} = \\frac{282}{6} = 47 = 0", "\\text{mean} = \\frac{282}{6} - 47 = 0"),
+    ("= \\frac{1}{4} \\log |x+1|", "= \\frac{11}{4} \\log |x+1|"),
+    ("\\text{we divide 1188 by 44}", "\\text{we divide 1188 by 42}"),
+])
+def test_same_math_tells_misreadings_apart(a, b):
+    from lens.mathparse import same_math
+
+    assert not same_math(a, b)
+
+
+def test_column_addition_total_is_not_read_as_the_row_above_continued():
+    rows = ["7xy+5yz-3zx", "+", "4yz+9zx-4y", "5xy+9yz+3zx+5x-4y"]  # a third row the reader missed
+    _, finding = check_page(Page(steps=[Step(id=f"s{i}", latex=t) for i, t in enumerate(rows)]))
+    assert finding is None
+
+
+def test_bare_expressions_without_a_column_still_link():
+    rows = ["(x+1)^2", "x^2+2x+2"]
+    _, finding = check_page(Page(steps=[Step(id=f"s{i}", latex=t) for i, t in enumerate(rows)]))
+    assert finding is not None and finding.step_id == "s1"
+
+
+def test_the_question_copied_onto_the_page_is_not_checked():
+    # Held-out FERMAT img_492: the question's two equations read as one line.
+    p = page(r"\text{Question: Solve the system of equations}", "2x+5y=13 x+2y=7", "x = 7 - 2y",
+             problem="Solve the system of equations 2x+5y=13 x+2y=7")
+    out, finding = check_page(p)
+    assert finding is None and out.steps[1].status == "unverifiable"
+
+
+def test_a_wrong_step_that_only_resembles_the_question_is_still_checked():
+    _, finding = check_page(page("2x + 5 = 11", "2x = 11 + 5", problem="Solve 2x + 5 = 11"))
+    assert finding is not None and finding.step_id == "s2"
+
+
+def test_inverse_trig_outside_its_range_is_not_claimed():
+    # sin^-1(sin 2t) = 2t holds where the inverse is taken; SymPy's sample points miss it.
+    _, finding = check_page(page("= \\sin^{-1}(2\\sin\\theta\\cos\\theta) = \\sin^{-1}(\\sin2\\theta) = 2\\theta"))
+    assert finding is None
+
+
+def test_line_that_goes_on_in_the_next_is_not_claimed():
+    _, finding = check_page(page(
+        "13824 = 2 \\times 2 \\times 2 \\times 2 \\times 2 \\times 2 \\times 2 \\times 2 \\times 3 \\times 3",
+        "\\times 3"))
+    assert finding is None
+    _, finding = check_page(page("13824 = 2 \\times 2 \\times 3"))
+    assert finding is not None  # finished as written: still a mistake
+
+
+def test_division_by_zero_read_above_is_not_a_claim():
+    _, finding = check_page(page("= \\frac{1}{2} + \\left(\\frac{0 - \\frac{1}{2}}{0}\\right)", "= \\frac{1}{4}"))
+    assert finding is None

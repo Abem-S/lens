@@ -31,9 +31,10 @@ class EvalItem:
     load_image: Callable[[], bytes] = field(repr=False)
     problem: str | None
     # 0-based index of the first wrong line; "none" for a correct page; "unknown"
-    # when the page has an error but the dataset does not say which line;
-    # None for reading-only items (no error label).
-    first_error_step: int | Literal["none", "unknown"] | None
+    # when the page has an error but the dataset does not say which line; "disputed"
+    # when the dataset's label is wrong (FERMAT_LABEL_ERRORS); None for reading-only
+    # items (no error label).
+    first_error_step: int | Literal["none", "unknown", "disputed"] | None
     reference: str | None = None  # expert transcription, for reading accuracy
     meta: dict = field(default_factory=dict)
 
@@ -56,6 +57,22 @@ def eval_cache(settings: Settings | None = None) -> Path:
 
 FERMAT_REPO = "ai4bharat/FERMAT"
 FERMAT_SHARDS = 10
+
+# Pages FERMAT labels correct whose handwriting carries a real mathematical mistake,
+# checked by hand against the photo. Most inherit it from FERMAT's own reference
+# solution. Flagging one is not a false alarm, and missing it is not a miss, so they
+# are scored apart ("disputed"); the raw FERMAT count is still printed.
+FERMAT_LABEL_ERRORS = {
+    "img_296_pert_5.3": "the added line '= 1960000 - 8200 + 9' does not equal the line above "
+                        "(1960000 + 9 - 8400)",
+    "img_423_pert_5.3": "the page writes (1/6) \\int t^{-1/2} dt and then (1/6)(2/3) t^{3/2}; with t^{-1/2} "
+                        "the integral is 2 t^{1/2} (the reference solution has the same slip)",
+    "img_441_pert_5.1": "the page claims f''(u) >= 0 for all u, but f''(u) = 12u - 12 "
+                        "(the reference solution says f''(x) where f'(x) is meant)",
+    "img_28_pert_5.3": "the added note writes (-2 + 6) + (4 + 8) = 2 + 12 = 14; -2 + 6 is 4",
+    "img_558_pert_5.2": "the table gives z^2 as the coefficient of y in y^2 + 5 (copied from the reference "
+                        "solution); y^2 + 5 has no z",
+}
 
 
 def fermat_shards(cache: Path, shards: int | None = None) -> list[Path]:
@@ -118,7 +135,8 @@ def load_fermat(cache: Path | None = None, shards: int | None = None, ids: set[s
                     problem=row.get("orig_q"),
                     # FERMAT labels the error, not the line; the reasoning text
                     # describes where it is.
-                    first_error_step="unknown" if has_error else "none",
+                    first_error_step=("disputed" if str(row.get("new_custom_id")) in FERMAT_LABEL_ERRORS
+                                      else "unknown" if has_error else "none"),
                     reference=row.get("pert_a") if has_error else row.get("orig_a"),
                     meta={k: row.get(k) for k in ("grade", "domain_code", "pert_reasoning", "rotation")},
                 )

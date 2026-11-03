@@ -3,12 +3,26 @@
 // "line_done" when a line is finished and the hand has left it, and where the outlined
 // line is now. Tracking owns the check trigger while it is live; the still-frame
 // ChangeDetector stays as the fallback (and still catches a first view or a new page).
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CheckResult, Step } from "../contract";
 import type { Trigger } from "./changeDetect";
+import { backoffMs } from "./errors";
 
 export type Box = [number, number, number, number]; // x, y, w, h normalised
 export type Phase = "writing" | "paused" | "clear";
+export type Point = [number, number];
+
+/** Where the outlined step is now (lens/follow.py, run by the server on the tracked frames,
+ * started from the frame the check read). `anchor`: the step's box on that check frame;
+ * `quad`: its corners now (tl, tr, br, bl), so a turned page turns the outline too. */
+export interface Followed {
+  anchor: Box;
+  quad: [Point, Point, Point, Point];
+  box: Box;
+  state: "ok" | "held" | "lost";
+  score: number;
+  lost: number;
+}
 
 export interface TrackMessage {
   type: "track";
@@ -17,12 +31,22 @@ export interface TrackMessage {
   pointer: [number, number] | null;
   pointer_kind: "pen" | "finger" | null;
   events: { type: string; box?: Box; phase?: Phase }[];
-  follow: Record<string, { box: Box; score: number; lost: number } | null>;
+  follow: Record<string, Followed | null>;
   objects: { concept: string; id: number; box: Box }[];
   gpu_ms?: number;
 }
 
 export const FRAME_WIDTH = 512; // px sent per frame (~15 kB JPEG)
+export const FRAME_MIN_HEIGHT = 384; // a wide webcam frame keeps this many rows (the page is small in it)
+export const FRAME_MAX_WIDTH = 768;
+
+/** Size of a tracking frame: 512 px wide, but a wide (16:9 webcam) frame keeps at least 384 px
+ * of height, so handwriting on a page held up in the middle stays legible for the outline. */
+export function frameSize(videoWidth: number, videoHeight: number): [number, number] {
+  const want = Math.max(FRAME_WIDTH, Math.round((FRAME_MIN_HEIGHT * videoWidth) / videoHeight));
+  const w = Math.min(want, FRAME_MAX_WIDTH, videoWidth);
+  return [w, Math.round((w * videoHeight) / videoWidth)];
+}
 export const FPS = 5; // frames offered per second
 export const MAX_IN_FLIGHT = 2; // frames sent but not answered; the rest are skipped
 export const STALE_MS = 2000; // an unanswered frame older than this no longer counts
@@ -33,10 +57,21 @@ export const PHASE_LABEL: Record<Phase, string> = {
   clear: "Watching the page",
 };
 
-/** While tracking is live it decides when a line is done; the still-frame detector
- * only keeps the triggers tracking cannot see (first look at a page, a new page). */
-export function stillTriggerAllowed(trackingLive: boolean, trigger: Trigger): boolean {
-  return !trackingLive || trigger === "first_view" || trigger === "page_changed";
+/** After a check, the still-frame detector's "new ink" waits this long before it may
+ * start a check of its own while tracking is live. Measured in the owner's phone test
+ * (2026-11-01): a line_done check's frame still had the hand over the page, so the ink
+ * under the hand looked "new" once the hand moved, and a whole-page check (40 s) queued
+ * behind every line check. */
+export const STILL_AFTER_CHECK_MS = 30_000;
+
+/** While tracking is live it decides when a line it saw being written is done; the
+ * still-frame detector keeps the triggers tracking cannot see: a first look at a page,
+ * a new page, and ink that appeared without tracking seeing it written (a notebook
+ * lowered to write and held up to the webcam again), but not right after a check. */
+export function stillTriggerAllowed(trackingLive: boolean, trigger: Trigger, sawWriting = true,
+  sinceCheckMs = Infinity): boolean {
+  if (!trackingLive || trigger === "first_view" || trigger === "page_changed") return true;
+  return !sawWriting && sinceCheckMs >= STILL_AFTER_CHECK_MS;
 }
 
 /** Binary frame message: 4-byte big-endian frame number, then the JPEG. */
@@ -47,28 +82,48 @@ export function encodeFrame(seq: number, jpeg: Uint8Array): Uint8Array<ArrayBuff
   return out;
 }
 
-/** Map a box drawn on the check frame to where the tracked anchor box is now. */
-export function mapBox(b: Box, from: Box, to: Box): Box {
-  const sx = from[2] > 0 ? to[2] / from[2] : 1;
-  const sy = from[3] > 0 ? to[3] / from[3] : 1;
-  return [to[0] + (b[0] - from[0]) * sx, to[1] + (b[1] - from[1]) * sy, b[2] * sx, b[3] * sy];
+/** The affine map that takes the anchor box's corners onto the followed quad. */
+export function quadMap(anchor: Box, quad: Followed["quad"]): (p: Point) => Point {
+  const [[x0, y0], [x1, y1], , [x3, y3]] = quad;
+  const [ax, ay, aw, ah] = anchor;
+  return ([x, y]) => {
+    const u = aw > 0 ? (x - ax) / aw : 0, v = ah > 0 ? (y - ay) / ah : 0;
+    return [x0 + u * (x1 - x0) + v * (x3 - x0), y0 + u * (y1 - y0) + v * (y3 - y0)];
+  };
 }
 
-/** The check result drawn where the page is now: every box and the outline move with
- * the tracked mistake line (`from` = its box on the check frame, `to` = its box now). */
-export function moveResult(result: CheckResult | null, from: Box | null, to: Box | null): CheckResult | null {
-  if (!result || !from || !to) return result;
-  const near = Math.abs(from[0] - to[0]) + Math.abs(from[1] - to[1]) + Math.abs(from[2] - to[2]) < 0.004;
-  if (near) return result;
-  const steps: Step[] = result.page.steps.map((s) => ({ ...s, bbox: mapBox(s.bbox, from, to) }));
-  const finding = result.finding && {
-    ...result.finding,
-    mask: result.finding.mask?.map(([x, y]) => [
-      to[0] + (x - from[0]) * (from[2] > 0 ? to[2] / from[2] : 1),
-      to[1] + (y - from[1]) * (from[3] > 0 ? to[3] / from[3] : 1),
-    ] as [number, number]) ?? null,
-  };
-  return { page: { ...result.page, steps }, finding };
+/** A box carried by `map`, as the axis-aligned bounds of its moved corners. */
+export function mapBox(b: Box, map: (p: Point) => Point): Box {
+  const pts = [map([b[0], b[1]]), map([b[0] + b[2], b[1]]), map([b[0] + b[2], b[1] + b[3]]), map([b[0], b[1] + b[3]])];
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)];
+}
+
+const sameBox = (a: Box, b: Box) => a.every((v, i) => Math.abs(v - b[i]) < 2e-3);
+
+/** The check result drawn where the page is now. Every box and the outline move with the
+ * followed step (an affine map, so turns and zoom carry over). `outline` says how sure that
+ * place is: "ok" (seen now), "held" (covered a moment, or tracking paused: faded), "lost"
+ * (not found: hidden rather than drawn on the wrong place). A follow report for another
+ * step (an older check) is not used: the outline then waits for its own ("lost"). */
+export function moveResult(result: CheckResult | null, followed: Followed | null, live: boolean): CheckResult | null {
+  if (!result?.finding) return result;
+  const finding = result.finding;
+  const step = result.page.steps.find((s) => s.id === finding.step_id);
+  if (!step || !(step.bbox[2] > 0)) return result;
+  if (!followed || !sameBox(followed.anchor, step.bbox)) {
+    // Tracking that never reported (off, unavailable): draw where the check saw it. Live
+    // tracking that has not located this step yet: hide it until it has.
+    return live ? { ...result, outline: "lost" } : result;
+  }
+  const outline = followed.state === "lost" ? "lost" : live ? followed.state : "held";
+  const map = quadMap(followed.anchor, followed.quad);
+  const steps: Step[] = result.page.steps.map((s) => ({ ...s, bbox: mapBox(s.bbox, map) }));
+  const b = step.bbox;
+  const mask: Point[] = finding.mask && finding.mask.length >= 3
+    ? finding.mask
+    : [[b[0], b[1]], [b[0] + b[2], b[1]], [b[0] + b[2], b[1] + b[3]], [b[0], b[1] + b[3]]];
+  return { page: { ...result.page, steps }, finding: { ...finding, mask: mask.map(map) }, outline };
 }
 
 /** The line a fingertip points at (a simpler cousin of lens/pointing.py:nearest_step). */
@@ -106,11 +161,19 @@ export function useTracking(getVideo: () => HTMLVideoElement | null, enabled: bo
   const ws = useRef<WebSocket | null>(null);
   const seq = useRef(0);
   const inflight = useRef<Map<number, number>>(new Map());
+  const sawWriting = useRef(false); // tracking saw the pen writing since the last check
+  const checkedAt = useRef(-Infinity); // performance.now() of the last check sent
   const optsRef = useRef(opts);
   const getVideoRef = useRef(getVideo);
   getVideoRef.current = getVideo;
   optsRef.current = opts;
   const canvas = useRef<HTMLCanvasElement | null>(null);
+
+  // Reconnect after the service went away (a cold start that failed, the server's time cap,
+  // a network drop), with growing waits; never after "Modal is not configured".
+  const [attempt, setAttempt] = useState(0);
+  const failures = useRef(0);
+  const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -120,27 +183,47 @@ export function useTracking(getVideo: () => HTMLVideoElement | null, enabled: bo
     sock.binaryType = "arraybuffer";
     ws.current = sock;
     setStatus("connecting");
+    let retry = true;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let closedByUs = false;
+    const scheduleRetry = () => {
+      if (closedByUs || !retry || retryTimer) return;
+      retryTimer = setTimeout(() => setAttempt((a) => a + 1), backoffMs(failures.current++ + 2));
+    };
     sock.onmessage = (ev) => {
       if (typeof ev.data !== "string") return;
       const m = JSON.parse(ev.data);
-      if (m.type === "ready") setStatus("live");
-      else if (m.type === "unavailable") setStatus("unavailable");
-      else if (m.type === "track") {
+      if (m.type === "ready") {
+        setStatus("live");
+        setNote(null);
+        failures.current = 0;
+      } else if (m.type === "unavailable") {
+        setStatus("unavailable");
+        if (m.retry === false) retry = false;
+        setNote(m.message ?? null);
+        scheduleRetry();
+      } else if (m.type === "track") {
         const t = m as TrackMessage;
         for (const k of [...inflight.current.keys()]) if (k <= t.seq) inflight.current.delete(k);
+        if (t.phase === "writing") sawWriting.current = true;
         setLast(t);
         optsRef.current.onTrack?.(t);
         for (const e of t.events) if (e.type === "line_done" && e.box) optsRef.current.onLineDone?.(e.box);
       }
     };
-    sock.onclose = () => setStatus((s) => (s === "live" || s === "connecting" ? "unavailable" : s));
+    sock.onclose = () => {
+      setStatus((s) => (s === "live" || s === "connecting" ? "unavailable" : s));
+      scheduleRetry();
+    };
     return () => {
+      closedByUs = true;
+      if (retryTimer) clearTimeout(retryTimer);
       sock.close();
       ws.current = null;
       inflight.current.clear();
       setStatus("off");
     };
-  }, [enabled]);
+  }, [enabled, attempt]);
 
   // Offer a frame FPS times a second; skip it while MAX_IN_FLIGHT frames are unanswered.
   useEffect(() => {
@@ -152,8 +235,7 @@ export function useTracking(getVideo: () => HTMLVideoElement | null, enabled: bo
       for (const [k, t] of inflight.current) if (now - t > STALE_MS) inflight.current.delete(k);
       if (inflight.current.size >= MAX_IN_FLIGHT) return;
       const c = (canvas.current ??= document.createElement("canvas"));
-      c.width = Math.min(FRAME_WIDTH, v.videoWidth);
-      c.height = Math.round((c.width * v.videoHeight) / v.videoWidth);
+      [c.width, c.height] = frameSize(v.videoWidth, v.videoHeight);
       c.getContext("2d")!.drawImage(v, 0, 0, c.width, c.height);
       const n = ++seq.current;
       inflight.current.set(n, now);
@@ -165,47 +247,15 @@ export function useTracking(getVideo: () => HTMLVideoElement | null, enabled: bo
     return () => clearInterval(timer);
   }, [enabled]);
 
-  /** Keep the line at `box` (on frame `atSeq`, default: the newest frame) located from now on. */
-  const follow = useCallback((box: Box, atSeq?: number) => {
-    const s = ws.current;
-    if (s?.readyState === WebSocket.OPEN)
-      s.send(JSON.stringify({ type: "follow", key: "finding", box, seq: atSeq ?? seq.current }));
-  }, []);
-  const unfollow = useCallback(() => {
-    const s = ws.current;
-    if (s?.readyState === WebSocket.OPEN) s.send(JSON.stringify({ type: "unfollow", key: "finding" }));
-  }, []);
-
-  return { status, live: status === "live", last, follow, unfollow, seq };
+  return { status, live: status === "live", last, seq, sawWriting, checkedAt, note };
 }
 
-/** Outline following for a check result: remembers the frame a check read, asks the
- * tracker to follow the mistake line from there, and returns the result moved to
- * where the page is now. `followBox` is the tracker's latest box for that line. */
-export function useFollowedResult(
-  result: CheckResult | null,
-  checkSeq: number | null,
-  follow: (box: Box, atSeq?: number) => void,
-  unfollow: () => void,
-  followBox: Box | null,
-  live: boolean,
-): CheckResult | null {
-  const anchor = useRef<Box | null>(null);
-  const finding = result?.finding ?? null;
-  const step = finding ? result?.page.steps.find((s) => s.id === finding.step_id) : undefined;
-  const key = step ? `${finding?.step_id}:${step.bbox.join(",")}` : "";
-  useEffect(() => {
-    if (!live) return;
-    if (step && step.bbox[2] > 0 && step.bbox[3] > 0) {
-      anchor.current = step.bbox;
-      follow(step.bbox, checkSeq ?? undefined);
-    } else {
-      anchor.current = null;
-      unfollow();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, live]);
-  return live ? moveResult(result, anchor.current, followBox) : result;
+/** A line for the screen about live tracking, or null when there is nothing to say. */
+export function trackingNote(status: TrackingStatus, serverNote: string | null): string | null {
+  if (status === "connecting") return "Waking up live tracking (up to 30 s). Lens still checks your page meanwhile.";
+  if (status === "unavailable")
+    return serverNote ?? "Live tracking is off for now, so Lens checks your page when it goes still.";
+  return null;
 }
 
 /** Everything a Lens mode needs from tracking, in one hook: frames out, a check on
@@ -214,22 +264,30 @@ export function useLensTracking(
   getVideo: () => HTMLVideoElement | null,
   enabled: boolean,
   result: CheckResult | null,
-  onLineDone: () => void,
+  onLineDone: (box: Box) => void,
   id?: string,
 ) {
-  const checkSeq = useRef<number | null>(null);
   const t = useTracking(getVideo, enabled, { onLineDone, id });
-  const followBox = t.last?.follow?.finding?.box ?? null;
-  const shown = useFollowedResult(result, checkSeq.current, t.follow, t.unfollow, followBox, t.live);
+  const shown = moveResult(result, t.last?.follow?.finding ?? null, t.live);
   const fingerStep =
     t.live && t.last?.pointer_kind === "finger" && shown ? pointedStep(t.last.pointer, shown.page.steps) : null;
   return {
     live: t.live,
     status: t.status,
+    note: trackingNote(t.status, t.note),
+    /** The latest processed frame (to tell presence that a hand is moving). */
+    last: t.last,
     result: shown,
     pointingStep: fingerStep?.id ?? null,
     label: t.live && t.last ? PHASE_LABEL[t.last.phase] : null,
-    /** Call when a frame is grabbed for a check: its outline will start from this frame. */
-    markCheck: () => void (checkSeq.current = t.seq.current),
+    /** May the still-frame detector's `trigger` start a check now? */
+    stillAllowed: (trigger: Trigger) =>
+      stillTriggerAllowed(t.live, trigger, t.sawWriting.current, performance.now() - t.checkedAt.current),
+    /** Call when a frame is grabbed for a check: tracking starts a new line. (The outline
+     * starts from that very frame on the server, which gets it with the check.) */
+    markCheck: () => {
+      t.sawWriting.current = false;
+      t.checkedAt.current = performance.now();
+    },
   };
 }

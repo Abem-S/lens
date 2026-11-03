@@ -32,7 +32,8 @@ cache = modal.Volume.from_name("muna-lens-voice-cache", create_if_missing=True)
 app = modal.App(APP_NAME)
 
 
-@app.cls(image=image, gpu=["L4", "A10G", "T4"], volumes={"/vcache": cache}, scaledown_window=120, timeout=600)
+# scaledown_window must match lens.warm.SCALEDOWN_S; nothing ever pins a container up.
+@app.cls(image=image, gpu=["L4", "A10G", "T4"], volumes={"/vcache": cache}, scaledown_window=90, timeout=600)
 class Voice:
     @modal.enter()
     def load(self) -> None:

@@ -1,11 +1,13 @@
 """A4: the guardrail rejects hints that carry the answer; the writer never
 returns one. The live done criterion (zero leaks across eval errors) runs with a key."""
 
+import time
+
 import pytest
 
 from lens.checker import check_page
 from lens.contract import Page, Step
-from lens.hints import SAFE_HINT, expected_for, leak_reason, write_hint
+from lens.hints import SAFE_HINT, expected_for, leak_reason, where_it_fails, write_hint
 from lens.spark import CallLog, Reply
 
 
@@ -64,10 +66,36 @@ class ScriptedSpark:
 def test_writer_regenerates_after_a_leak_and_tells_the_model_why():
     page, finding = SIGN
     spark = ScriptedSpark(["So x = 3?", "What happened to the sign of the 5 when it crossed the equals sign?"])
-    hint, rejected = write_hint(spark, page, finding)
+    hint, rejected = write_hint(spark, page, finding, drafts=1)
     assert hint.startswith("What happened")
     assert len(rejected) == 1
     assert "rejected" in spark.prompts[1]
+
+
+class Racing(ScriptedSpark):
+    """Drafts starting with "Slow" take 0.3 s; the rest come back at once."""
+
+    def ask(self, prompt, **kw):
+        self.prompts.append(prompt)
+        text = self.replies.pop(0)
+        time.sleep(0.3 if text.startswith("Slow") else 0.0)
+        return Reply(text, CallLog("hint", kw.get("effort")))
+
+
+def test_two_drafts_at_once_the_first_safe_one_wins():
+    page, finding = SIGN
+    spark = Racing(["Slow: what did you do with the 5?", "Where did the 5 go when it crossed the equals sign?"])
+    t = time.monotonic()
+    hint, rejected = write_hint(spark, page, finding)
+    assert hint.startswith("Where did the 5 go") and rejected == []
+    assert time.monotonic() - t < 0.25  # did not wait for the slow draft
+    assert len(spark.prompts) == 2 and spark.prompts[0] == spark.prompts[1]
+
+
+def test_a_leaking_draft_loses_to_the_safe_one():
+    page, finding = SIGN
+    hint, rejected = write_hint(Racing(["So x = 3?", "Slow: what happened to the sign of the 5?"]), page, finding)
+    assert hint == "Slow: what happened to the sign of the 5?" and len(rejected) == 1
 
 
 def test_writer_falls_back_to_safe_hint_after_repeated_leaks():
@@ -76,3 +104,41 @@ def test_writer_falls_back_to_safe_hint_after_repeated_leaks():
     assert hint == SAFE_HINT
     assert len(rejected) == 3
     assert leak_reason(SAFE_HINT, expected_for(page, finding)) is None
+
+
+# The hint names the actual slip, not an earlier correct move (live: "3x = 11 + 4" ->
+# "3x = 14" got a hint about moving the four across).
+ADDITION = checked("3x - 4 = 11", "3x = 11 + 4", "3x = 14", problem="Solve 3x - 4 = 11")
+
+
+def test_where_names_the_side_that_was_worked_out_wrongly():
+    where, forbidden = where_it_fails(*ADDITION)
+    assert "11 + 4 to 14" in where and "right side" in where
+    assert "15" not in where  # the true value goes to the guardrail, never into the prompt
+    assert any(str(v) == "15" for v in forbidden)
+
+
+def test_true_value_of_the_slip_is_a_leak():
+    assert leak_reason("Is 11 + 4 really 15, then?", expected_for(*ADDITION)) is not None
+    assert leak_reason("Where you wrote 14 on the right, how did you get it from 11 + 4?",
+                       expected_for(*ADDITION)) is None
+
+
+def test_where_reaches_the_hint_prompt():
+    seen = []
+
+    class Spark:
+        def ask(self, prompt, **kw):
+            seen.append(prompt)
+            return Reply("Where you wrote 14, can you check how you got it?", CallLog("hint", kw.get("effort")))
+
+    write_hint(Spark(), *ADDITION)
+    assert "Exactly where" in seen[0] and "from 11 + 4 to 14" in seen[0]
+
+
+def test_where_for_other_slips():
+    assert "not multiplied or divided by the same number" in where_it_fails(
+        *checked("\\frac{x}{4} = 3", "x = \\frac{3}{4}"))[0]
+    assert "Rewriting (x+1)^2 as x^2 + 1" in where_it_fails(*EXPAND)[0]
+    assert "is not true" in where_it_fails(*DERIV)[0]
+    assert "without changing its sign" in where_it_fails(*SIGN)[0]

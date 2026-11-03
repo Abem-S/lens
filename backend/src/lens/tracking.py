@@ -11,7 +11,8 @@ Events (pure logic, unit-tested on synthetic tracks):
 - pointer: where the student points (pen tip, else the fingertip), every frame
 - line_done: a writing spell ended and the hand has left the new line; carries the
   box of the region written (from the pen tip's path) — the cue for a page check
-- follow: where the outlined line is now, after the page or camera moved
+- follow: where the outlined step is now, after the page or camera moved (lens.follow,
+  run here in the app on the frames it relays, started from the very frame the check read)
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import contextlib
 import logging
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -276,17 +278,77 @@ def _clamp(b: Box) -> Box:
 
 class TrackHub:
     """Latest pointer per tracking session, so the tutor can answer "this line?" without
-    a fresh SAM call when live tracking already knows where the student points."""
+    a fresh SAM call when live tracking already knows where the student points; plus
+    the student's live state (writing / paused / away) for the tutor's sense of the moment."""
 
-    def __init__(self, max_age_s: float = 1.5):
+    def __init__(self, max_age_s: float = 1.5, line_age_s: float = 10.0, live_age_s: float = 3.0,
+                 present_hold_s: float = 3.0):
         self.max_age_s = max_age_s
+        self.line_age_s = line_age_s
+        self.live_age_s = live_age_s  # tracking that has said nothing for this long is not live
+        self.present_hold_s = present_hold_s  # a hand that flickers out of the masks for a moment is still there
         self._pointers: dict[str, tuple[float, tuple[float, float] | None]] = {}
+        self._lines: dict[str, tuple[float, Box]] = {}
+        self._live: dict[str, dict] = {}
+        self._follow: dict[str, tuple[int, bytes, Box]] = {}
+        self._follow_n = 0
 
-    def update(self, track_id: str, pointer) -> None:
-        self._pointers[track_id] = (time.monotonic(), tuple(pointer) if pointer else None)
+    def follow(self, track_id: str | None, jpeg: bytes | None, box=None) -> None:
+        """Outline to keep on the live page: the step at `box` on the check frame `jpeg`
+        (None: nothing outlined any more). Set by the tutor when a check result arrives;
+        the tracking relay for this session moves it with the page from then on."""
+        if not track_id:
+            return
+        if jpeg is None or box is None or box[2] <= 0 or box[3] <= 0:
+            self._follow.pop(track_id, None)
+            return
+        self._follow_n += 1
+        self._follow[track_id] = (self._follow_n, jpeg, tuple(float(v) for v in box))
+
+    def followed(self, track_id: str | None) -> tuple[int, bytes, Box] | None:
+        return self._follow.get(track_id or "")
+
+    def update(self, track_id: str, pointer, phase: str | None = None, seen: bool = False) -> None:
+        """One processed frame: where the student points, the phase, and whether a hand or pen was seen."""
+        now = time.monotonic()
+        self._pointers[track_id] = (now, tuple(pointer) if pointer else None)
+        if phase is None:
+            return
+        st = self._live.setdefault(track_id, {"writing_at": None, "seen_at": None})
+        st["at"], st["phase"] = now, phase
+        if phase == "writing":
+            st["writing_at"] = now
+        if seen or phase != "clear":
+            st["seen_at"] = now
+
+    def live(self, track_id: str | None) -> dict | None:
+        """{"phase": "writing" | "paused" | "away", "present", "writing_ago_s"}, or None when
+        tracking is not live for this session. "paused": a hand or pen is in view (on the page,
+        or holding it) but not writing; "away": none seen for a few seconds."""
+        st = self._live.get(track_id or "")
+        now = time.monotonic()
+        if st is None or now - st["at"] > self.live_age_s:
+            return None
+        present = st["seen_at"] is not None and now - st["seen_at"] <= self.present_hold_s
+        phase = "writing" if st["phase"] == "writing" else ("paused" if present else "away")
+        ago = round(now - st["writing_at"], 1) if st["writing_at"] is not None else None
+        return {"phase": phase, "present": present, "writing_ago_s": ago}
+
+    def line_done(self, track_id: str, box) -> None:
+        """Remember where the last finished line is: the tutor checks just that line."""
+        self._lines[track_id] = (time.monotonic(), tuple(float(v) for v in box))
+
+    def last_line(self, track_id: str | None) -> Box | None:
+        if not track_id or track_id not in self._lines:
+            return None
+        t, box = self._lines[track_id]
+        return box if time.monotonic() - t <= self.line_age_s else None
 
     def drop(self, track_id: str) -> None:
+        """Tracking for this session ended (the outline to follow stays: it belongs to the tutor)."""
         self._pointers.pop(track_id, None)
+        self._lines.pop(track_id, None)
+        self._live.pop(track_id, None)
 
     def pointer(self, track_id: str | None) -> tuple[float, float] | None:
         if not track_id or track_id not in self._pointers:
@@ -308,6 +370,44 @@ class TrackHub:
         return locate
 
 
+FRAMES_KEPT = 12  # frames sent up and not yet answered are far fewer (at most 2 in flight)
+
+
+class OutlineFollower:
+    """The relay's side of outline following: (re)starts a `lens.follow.Follow` whenever
+    the hub gets a new outline for this session, and moves it on each answered frame."""
+
+    def __init__(self, hub: TrackHub, track_id: str):
+        self.hub, self.track_id = hub, track_id
+        self.version: int | None = None
+        self.follow = None
+        self.last: dict | None = None
+
+    def update(self, jpeg: bytes | None) -> dict:
+        from lens.follow import Follow, gray_of
+
+        want = self.hub.followed(self.track_id)
+        if want is None:
+            self.version = self.follow = self.last = None
+            return {}
+        version, check_jpeg, box = want
+        if version != self.version:
+            self.version, self.last = version, None
+            try:
+                self.follow = Follow(gray_of(check_jpeg, 1024), box)
+            except Exception:
+                log.exception("outline follow could not start")
+                self.follow = None
+        if self.follow is None:
+            return {}
+        if jpeg is not None:
+            try:
+                self.last = self.follow.update(gray_of(jpeg)) or self.last
+            except Exception:
+                log.exception("outline follow failed on a frame")
+        return {"finding": self.last} if self.last else {}
+
+
 def _now() -> float:
     """Clock for event timing (a seam for tests)."""
     return time.monotonic()
@@ -323,7 +423,7 @@ def endpoint_url() -> str:
     return url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/") + "/track"
 
 
-async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None) -> None:
+async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None, max_s: float | None = None) -> None:
     """Pump one tracking session: frames up to Modal, events back to the browser.
 
     `browser` is an accepted Starlette WebSocket. Browser -> app: binary frames (4-byte
@@ -339,6 +439,8 @@ async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None) -
     from starlette.concurrency import run_in_threadpool
     from starlette.websockets import WebSocketDisconnect
 
+    with contextlib.suppress(Exception):  # the browser shows "waking up" during a cold start
+        await browser.send_json({"type": "connecting"})
     try:
         url = url or await run_in_threadpool(endpoint_url)
         gpu = await websockets.connect(f"{url}?token={track_token()}", max_size=2**22, open_timeout=120,
@@ -350,6 +452,8 @@ async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None) -
 
     events = TrackEvents()
     started = _now()
+    frames: OrderedDict[int, bytes] = OrderedDict()  # recent frames sent up, by number, for the outline
+    follower = OutlineFollower(hub, track_id)
 
     async def up():
         try:
@@ -358,11 +462,14 @@ async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None) -
                 if msg["type"] == "websocket.disconnect":
                     break
                 if msg.get("bytes") is not None:
-                    await gpu.send(msg["bytes"])
-                elif msg.get("text") is not None:
-                    data = json.loads(msg["text"])
-                    if data.get("type") in ("follow", "unfollow"):
-                        await gpu.send(json.dumps(data))
+                    b = msg["bytes"]
+                    if len(b) > 4:
+                        frames[int.from_bytes(b[:4], "big")] = b[4:]
+                        while len(frames) > FRAMES_KEPT:
+                            frames.popitem(last=False)
+                    await gpu.send(b)
+                # Text from the browser ("follow" / "unfollow" from older pages) is no longer
+                # needed: the tutor tells the hub which step to outline, from the check frame.
         except (WebSocketDisconnect, websockets.ConnectionClosed):
             pass
 
@@ -373,9 +480,14 @@ async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None) -
                 if msg.get("type") == "tracks":
                     objs = parse_objects(msg["objects"])
                     out = events.push(_now() - started, objs)
-                    hub.update(track_id, out["pointer"])
+                    hub.update(track_id, out["pointer"], out["phase"], seen=bool(objs))
+                    for e in out["events"]:
+                        if e["type"] == "line_done":  # before the browser hears of it and uploads a frame
+                            hub.line_done(track_id, e["box"])
+                    follow = (await run_in_threadpool(follower.update, frames.get(msg.get("seq")))
+                              if hub.followed(track_id) or follower.version is not None else {})
                     await browser.send_json({
-                        "type": "track", "seq": msg.get("seq"), **out, "follow": msg.get("follow") or {},
+                        "type": "track", "seq": msg.get("seq"), **out, "follow": follow,
                         "objects": [{"concept": o.concept, "id": o.id, "box": list(o.box)} for o in objs],
                         "gpu_ms": msg.get("gpu_ms"), "wall_ms": msg.get("wall_ms"),
                     })
@@ -391,29 +503,46 @@ async def relay(browser, hub: TrackHub, track_id: str, url: str | None = None) -
             pass
 
     tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+    ended = "tracking ended"
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        _, running = await asyncio.wait(tasks, timeout=max_s, return_when=asyncio.FIRST_COMPLETED)
+        if len(running) == len(tasks):  # the time cap: the browser reconnects if the student is still there
+            ended = "time limit"
     finally:
         for t in tasks:
             t.cancel()
         await gpu.close()
         hub.drop(track_id)
         with contextlib.suppress(Exception):  # the browser may already be gone
-            await browser.send_json({"type": "unavailable", "reason": "tracking ended"})
+            await browser.send_json({"type": "unavailable", "reason": ended})
 
 
-def mount(app, settings, hub: TrackHub | None = None) -> TrackHub:
-    """Add `/ws/track?id=...` to the FastAPI app. Returns the hub the tutor reads pointers from."""
+def mount(app, settings, hub: TrackHub | None = None, limiter=None) -> TrackHub:
+    """Add `/ws/track?id=...` to the FastAPI app. Returns the hub the tutor reads pointers from.
+
+    `limiter` (lens.limits.Limiter) caps live-tracking sessions at once and how long one
+    socket may run (GPU cost); the browser falls back to still-frame checks when refused."""
     hub = hub or TrackHub()
 
     @app.websocket("/ws/track")
     async def track(ws: WebSocket):
         await ws.accept()
         if not settings.modal_configured and not os.environ.get("LENS_TRACK_URL"):
-            await ws.send_json({"type": "unavailable", "reason": "Modal is not configured"})
+            await ws.send_json({"type": "unavailable", "reason": "Modal is not configured", "retry": False})
             await ws.close()
             return
-        await relay(ws, hub, ws.query_params.get("id") or "anon")
+        if limiter is not None and not limiter.tracking.take():
+            from lens.limits import MESSAGES
+
+            await ws.send_json({"type": "unavailable", "reason": "busy", "message": MESSAGES["tracking"]})
+            await ws.close()
+            return
+        try:
+            max_s = limiter.limits.track_max_min * 60 if limiter is not None else None
+            await relay(ws, hub, ws.query_params.get("id") or "anon", max_s=max_s)
+        finally:
+            if limiter is not None:
+                limiter.tracking.give()
         with contextlib.suppress(Exception):
             await ws.close()
 

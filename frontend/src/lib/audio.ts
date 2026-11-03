@@ -45,15 +45,28 @@ export async function startMic(onFrame: (f: Float32Array) => void): Promise<() =
   };
 }
 
-/** Plays PCM16 chunks back to back; stop() silences everything at once (barge-in). */
+export const DUCK_GAIN = 0.25; // Lens's volume while it waits to learn whether the student really talks
+
+/** Plays PCM16 chunks back to back; duck() lowers the volume (maybe a barge-in), stop() silences
+ * everything at once (a real one). */
 export class Player {
   private ctx: AudioContext;
+  private gain: GainNode;
   private next = 0;
   private sources = new Set<AudioBufferSourceNode>();
   onIdle: (() => void) | null = null;
 
   constructor() {
     this.ctx = new AudioContext();
+    this.gain = this.ctx.createGain();
+    this.gain.connect(this.ctx.destination);
+  }
+
+  /** Lower (true) or restore (false) the volume, over ~30 ms so it does not click. */
+  duck(on: boolean): void {
+    const g = this.gain.gain;
+    g.cancelScheduledValues(this.ctx.currentTime);
+    g.setTargetAtTime(on ? DUCK_GAIN : 1, this.ctx.currentTime, 0.01);
   }
 
   async resume(): Promise<void> {
@@ -72,7 +85,7 @@ export class Player {
     for (let i = 0; i < ints.length; i++) ch[i] = ints[i] / 32768;
     const src = this.ctx.createBufferSource();
     src.buffer = buffer;
-    src.connect(this.ctx.destination);
+    src.connect(this.gain);
     const at = Math.max(this.ctx.currentTime + 0.02, this.next);
     src.start(at);
     this.next = at + buffer.duration;
@@ -93,6 +106,7 @@ export class Player {
     }
     this.sources.clear();
     this.next = 0;
+    this.duck(false);
     this.onIdle?.();
   }
 

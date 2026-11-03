@@ -14,8 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
-from openai import (APIConnectionError, APITimeoutError, BadRequestError, InternalServerError, OpenAI,
-                    RateLimitError)
+from openai import APIConnectionError, APITimeoutError, BadRequestError, InternalServerError, OpenAI, RateLimitError
 
 from lens.config import Settings
 
@@ -65,6 +64,46 @@ class EmptyReply(RuntimeError):
     """The model spent its whole token budget reasoning and returned no text."""
 
 
+class SparkStalled(TimeoutError):
+    """No copy of a hedged call answered within its deadline (the endpoint is queueing)."""
+
+
+# A stream that sends no byte for this long is stalled (queued); the attempt is dropped
+# and retried. Reasoning streams keep bytes flowing, so a live call never waits this long.
+READ_TIMEOUT_S = 75.0
+# A hedged call (image reads) gives up after this long in total, so nothing waits forever.
+HEDGE_DEADLINE_S = 150.0
+
+
+@dataclass
+class CostTally:
+    """Spend of one tutor session: Spark tokens and cost, plus GPU seconds kept warm."""
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    spark_usd: float = 0.0
+    unknown_cost: int = 0  # calls with no price set
+    gpu_s: dict = field(default_factory=dict)  # e.g. {"l40s": 120.0, "l4": 300.0}
+
+    def add(self, entry: CallLog) -> None:
+        self.calls += 1
+        self.prompt_tokens += entry.prompt_tokens
+        self.completion_tokens += entry.completion_tokens
+        if entry.cost_usd is None:
+            self.unknown_cost += 1
+        else:
+            self.spark_usd += entry.cost_usd
+
+    def summary(self, seconds: float, gpu_rates: dict) -> dict:
+        gpu_usd = sum(s * gpu_rates.get(k, 0.0) / 3600 for k, s in self.gpu_s.items())
+        total = self.spark_usd + gpu_usd
+        return {"minutes": round(seconds / 60, 1), "spark_calls": self.calls, "tokens_in": self.prompt_tokens,
+                "tokens_out": self.completion_tokens, "spark_usd": round(self.spark_usd, 4),
+                "gpu_s": {k: round(v) for k, v in self.gpu_s.items()}, "gpu_usd": round(gpu_usd, 4),
+                "total_usd": round(total, 4), "usd_per_hour": round(total * 3600 / seconds, 3) if seconds >= 60 else None,
+                "unknown_cost_calls": self.unknown_cost}
+
+
 @dataclass
 class SparkClient:
     api_key: str
@@ -78,11 +117,34 @@ class SparkClient:
     # Set to False after the server rejects `reasoning_effort` (some self-hosted
     # OpenAI-compatible servers do); later calls then leave it out.
     send_effort: bool = True
+    # Shared daily cap (lens.limits.DailyBudget): asked before every call, told every cost.
+    budget: Any = None
+    # This session's spend (set on a per-session copy: `for_session`).
+    tally: CostTally | None = None
+    # Called (with the purpose) when a hedged call is slow, so the student can be told.
+    on_slow: Any = None
+    hedge_deadline: float = HEDGE_DEADLINE_S
 
     def __post_init__(self) -> None:
         # We retry ourselves so that every attempt is logged.
+        timeout = httpx.Timeout(connect=15.0, read=READ_TIMEOUT_S, write=60.0, pool=15.0)
         self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=0,
-                              http_client=self.http_client, timeout=240)
+                              http_client=self.http_client, timeout=timeout)
+
+    def for_session(self, tally: CostTally, on_slow=None) -> SparkClient:
+        """A copy for one tutor session: same connection pool and daily budget, its own
+        call log, cost tally and "this is slow" callback."""
+        import copy
+
+        c = copy.copy(self)
+        c.calls, c.tally, c.on_slow = [], tally, on_slow
+        return c
+
+    def _admit(self) -> None:
+        if self.budget is not None and not self.budget.allow():
+            from lens.limits import BudgetExceeded
+
+            raise BudgetExceeded()
 
     @classmethod
     def from_settings(cls, s: Settings) -> SparkClient:
@@ -101,6 +163,10 @@ class SparkClient:
     def _record(self, entry: CallLog) -> None:
         entry.cost_usd = self._cost(entry.prompt_tokens, entry.completion_tokens)
         self.calls.append(entry)
+        if self.budget is not None:
+            self.budget.record(entry.cost_usd)
+        if self.tally is not None:
+            self.tally.add(entry)
         cost = f"${entry.cost_usd:.5f}" if entry.cost_usd is not None else "cost unknown"
         log.info("spark %s effort=%s in=%d out=%d %.2fs %s", entry.purpose, entry.effort,
                  entry.prompt_tokens, entry.completion_tokens, entry.seconds, cost)
@@ -150,6 +216,7 @@ class SparkClient:
         hedge_after: if no reply after this many seconds, send the same request
         again (up to twice) and take whichever finishes first. Image calls on the
         shared endpoint sometimes queue for a minute; a fresh copy usually does not."""
+        self._admit()
         start = time.monotonic()
         kw = self._kwargs(messages, effort, max_tokens, json_mode)
         kw.update(stream=True, stream_options={"include_usage": True})
@@ -191,17 +258,29 @@ class SparkClient:
         pending = set(futures)
         extra: list[CallLog] = []
         winner = None
+        deadline = start + self.hedge_deadline
         try:
             while winner is None:
-                done, pending = cf.wait(pending, timeout=hedge_after if len(futures) < 3 else None,
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    log.warning("spark %s: no copy answered in %.0fs; giving up", purpose, self.hedge_deadline)
+                    raise SparkStalled(f"{purpose}: no reply in {self.hedge_deadline:.0f}s")
+                done, pending = cf.wait(pending, timeout=min(hedge_after, left) if len(futures) < 3 else left,
                                         return_when=cf.FIRST_COMPLETED)
                 winner = next((f for f in done if f.exception() is None), None)
                 if winner is not None:
                     break
+                if not done and time.monotonic() >= deadline:
+                    continue
                 if len(futures) < 3:
                     if not done:
                         log.info("spark %s: no reply after %.0fs, sending a hedge copy", purpose,
                                  time.monotonic() - start)
+                        if len(futures) == 1 and self.on_slow is not None:
+                            try:
+                                self.on_slow(purpose)
+                            except Exception:
+                                log.exception("on_slow callback failed")
                     f = pool.submit(self._with_retries, call)
                     futures.append(f)
                     pending.add(f)
@@ -225,6 +304,7 @@ class SparkClient:
     def stream(self, messages: list[dict], *, effort: Effort | None = None, max_tokens: int = REPLY_MAX_TOKENS,
                purpose: str = "stream") -> Iterator[str]:
         """Yield text deltas as they arrive; logs usage when the stream ends."""
+        self._admit()
         start = time.monotonic()
         kw = self._kwargs(messages, effort, max_tokens, False)
         kw.update(stream=True, stream_options={"include_usage": True})

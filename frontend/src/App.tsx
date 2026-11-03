@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { warmUp } from "./lib/api";
 import { DemoMode } from "./modes/DemoMode";
 import { PhonePage } from "./modes/PhonePage";
 import { PhoneScreenMode } from "./modes/PhoneScreenMode";
@@ -10,6 +11,14 @@ export function App() {
   const phoneMatch = window.location.pathname.match(/^\/phone\/([\w-]+)/);
   const initial: Mode = new URLSearchParams(window.location.search).has("demo") ? "demo" : "start";
   const [mode, setMode] = useState<Mode>(initial);
+  // Someone reached for a choice: wake the GPU services now so the session starts warm. Only on
+  // a real touch (a visitor who never interacts wakes nothing), once per page load.
+  const warmed = useRef(false);
+  const warm = () => {
+    if (warmed.current) return;
+    warmed.current = true;
+    warmUp();
+  };
   if (phoneMatch) return <PhonePage sessionId={phoneMatch[1]} />;
 
   const exit = () => setMode("start");
@@ -23,13 +32,13 @@ export function App() {
         Muna <b>Lens</b>
       </h1>
       <p className="lede">
-        Solve on paper. Lens reads each line, finds the first real mistake, and asks you a question about it. It
+        Solve on paper. Lens reads each step, finds the first real mistake, and asks you a question about it. It
         never gives the answer.
       </p>
-      <div className="choices">
+      <div className="choices" onPointerEnter={warm} onFocus={warm} onTouchStart={warm}>
         <button onClick={() => setMode("webcam")}>
           <strong>Use this laptop’s camera</strong>
-          <span>Hold your notebook up and point: “this line?”</span>
+          <span>Hold your notebook up and point: “is this right?”</span>
         </button>
         <button onClick={() => setMode("phone")}>
           <strong>Use my phone as the camera</strong>

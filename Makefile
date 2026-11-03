@@ -1,4 +1,4 @@
-.PHONY: install dev dev-https serve test build eval deploy-gpu deploy-glimmer
+.PHONY: install dev dev-https serve test build eval deploy-gpu deploy-glimmer deploy-web test-modal eval-modal
 
 install:            ## install backend + frontend dependencies
 	cd backend && uv sync --extra eval --extra gpu
@@ -30,10 +30,22 @@ eval:               ## A5 scorecard (needs BASETEN; FERMAT also needs HF_TOKEN)
 	cd backend && uv run --extra eval lens-eval --source all --limit 20
 
 deploy-gpu:         ## deploy SAM + voice services to Modal (needs MODAL_TOKEN_*, HF_TOKEN)
-	cd backend && uv run --extra gpu modal deploy modal_apps/sam.py
-	cd backend && uv run --extra gpu modal deploy modal_apps/voice.py
-	cd backend && uv run --extra gpu modal deploy modal_apps/sam31.py
+	$(MODAL) deploy modal_apps/sam.py
+	$(MODAL) deploy modal_apps/voice.py
+	$(MODAL) deploy modal_apps/sam31.py
 
-deploy-glimmer:     ## optional: Muse Glimmer on Modal (needs MODAL_TOKEN_*, GLIMMER_API_KEY in the environment)
-	cd backend && uv run --extra gpu modal run modal_apps/glimmer.py::download
-	cd backend && uv run --extra gpu modal deploy modal_apps/glimmer.py
+# Modal commands read the keys from .env (MODAL_TOKEN_ID / MODAL_TOKEN_SECRET).
+MODAL = cd backend && set -a && . ../.env && set +a && uv run --extra gpu modal
+
+deploy-web: build   ## the app on Modal with HTTPS (phone pairing from any network); prints the URL
+	$(MODAL) deploy modal_apps/web.py
+
+test-modal:         ## backend tests in a Modal container instead of this machine
+	$(MODAL) run modal_apps/ci.py --task test
+
+eval-modal:         ## A5 scorecard in a Modal container; pass ARGS="--source fermat --limit 40"
+	$(MODAL) run modal_apps/ci.py --task eval $(if $(ARGS),--args "$(ARGS)",)
+
+deploy-glimmer:     ## optional: Muse Glimmer on Modal (needs GLIMMER_API_KEY in .env)
+	$(MODAL) run modal_apps/glimmer.py::download
+	$(MODAL) deploy modal_apps/glimmer.py

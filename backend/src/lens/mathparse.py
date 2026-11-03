@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Literal
 
 import sympy as sp
@@ -267,3 +268,47 @@ def numeric_sides(latex: str) -> list[list[sp.Expr]] | None:
         return None  # different units on different sides: a conversion, not arithmetic
     runs = [r for r in runs if len(r) >= 2]
     return runs or None
+
+
+# ---------- two readings of one line ----------
+
+_CANON_WORDS = re.compile(r"\\(?:text|mathrm|textbf|mbox|operatorname)\s*\{([^{}]*)\}")
+_CANON_DROP = re.compile(r"\s+|\\[,;:! ]|\\left|\\right|\\displaystyle|\\quad|\\qquad|\$")
+_CANON_SAME = ((r"\dfrac", r"\frac"), (r"\tfrac", r"\frac"), (r"\cdot", "*"), (r"\times", "*"),
+               (r"\leq", r"\le"), (r"\geq", r"\ge"))
+_TOKENS = re.compile(r"\d+(?:\.\d+)?|\\le|\\ge|[=+\-*/<>^]")
+SAME_WORDS_RATIO = 0.8
+
+
+def _canon(latex: str) -> str:
+    s = _CANON_WORDS.sub(r"\1", latex)
+    for a, b in _CANON_SAME:
+        s = s.replace(a, b)
+    s = _CANON_DROP.sub("", s)
+    s = re.sub(r"(?<!\d)\.|\.(?!\d)", "*", s)  # a dot that is not a decimal point is a product dot
+    prev = None
+    while prev != s:  # x^{2} -> x^2, d_{1} -> d_1
+        prev, s = s, re.sub(r"\{(\w)\}", r"\1", s)
+    return s.rstrip("*,;:").lower()
+
+
+def same_math(a: str, b: str) -> bool:
+    """Two readings of one written line say the same thing.
+
+    Lines SymPy parses: equal value side by side (2x and 2 \\cdot x agree; 8400 and
+    8200 do not). Other lines: the same numbers and operators in the same order, and
+    nearly the same words. Used so that a mistake is claimed only when its lines read
+    the same twice."""
+    ca, cb = _canon(a), _canon(b)
+    if ca == cb:
+        return True
+    x, y = analyse(a), analyse(b)
+    if x.kind != "unparseable" and y.kind != "unparseable":
+        if x.continuation != y.continuation or len(x.sides) != len(y.sides):
+            return False
+        try:
+            return all(p == q or sp.expand(p - q) == 0 for p, q in zip(x.sides, y.sides))
+        except Exception:
+            return False
+    return (_TOKENS.findall(ca) == _TOKENS.findall(cb)
+            and SequenceMatcher(None, ca, cb, autojunk=False).ratio() >= SAME_WORDS_RATIO)

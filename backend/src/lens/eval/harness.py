@@ -16,11 +16,13 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from lens.contract import Finding, Page
 from lens.eval.loaders import SOURCES, EvalItem, load
 
-# pipeline(image, problem) -> (checked page, first finding or None)
+# pipeline(image, problem) -> (checked page, first finding or None). A pipeline may
+# also accept trace= (a dict it fills with what the confirmation saw); it is saved.
 Pipeline = Callable[[bytes, str | None], tuple[Page, Finding | None]]
 FALSE_ALARM_GATE = 1 / 20
 
@@ -35,6 +37,9 @@ class Score:
     false_alarms: int = 0    # correct page, something flagged
     clean_ok: int = 0        # correct page, nothing flagged
     failures: int = 0        # pipeline raised
+    # Pages the dataset mislabels as correct (loaders.FERMAT_LABEL_ERRORS): scored apart.
+    disputed_flagged: int = 0
+    disputed_quiet: int = 0
     reading_similarity: list[float] = field(default_factory=list)
     seconds: float = 0.0
     cost_usd: float | None = 0.0
@@ -60,6 +65,7 @@ class Score:
         d = {k: v for k, v in asdict(self).items() if k != "reading_similarity"}
         d.update(
             error_pages=self.error_pages, clean_pages=self.clean_pages,
+            raw_false_alarms=self.false_alarms + self.disputed_flagged,
             catch_rate=round(self.caught / self.error_pages, 3) if self.error_pages else None,
             false_alarm_rate=None if self.false_alarm_rate is None else round(self.false_alarm_rate, 3),
             gate_passed=self.gate_passed,
@@ -97,6 +103,12 @@ def score_item(score: Score, item: EvalItem, page: Page, finding: Finding | None
     label = item.first_error_step
     if label is None:
         return "read"
+    if label == "disputed":
+        if finding is None:
+            score.disputed_quiet += 1
+            return "disputed_quiet"
+        score.disputed_flagged += 1
+        return "disputed_flagged"
     if label == "none":
         if finding is None:
             score.clean_ok += 1
@@ -116,7 +128,7 @@ def score_item(score: Score, item: EvalItem, page: Page, finding: Finding | None
 
 def run(items: Iterable[EvalItem], pipeline: Pipeline, cost: Callable[[], float | None] = lambda: None,
         log: Callable[[str], None] = lambda s: None, workers: int = 1,
-        record: Callable[[EvalItem, Page, Finding | None, str], None] | None = None) -> dict[str, Score]:
+        record: Callable[[EvalItem, Page, Finding | None, str, dict], None] | None = None) -> dict[str, Score]:
     """Score every item. With workers > 1 pages run in parallel; cost is then
     the total spend split evenly over pages."""
     from concurrent.futures import ThreadPoolExecutor
@@ -125,11 +137,18 @@ def run(items: Iterable[EvalItem], pipeline: Pipeline, cost: Callable[[], float 
     items = list(items)
     total_before = cost() if workers > 1 else None
 
+    import inspect
+
+    traced = "trace" in inspect.signature(pipeline).parameters
+    traces: dict[int, dict] = {}
+
     def one(item: EvalItem):
         start = time.monotonic()
         before = cost() if workers == 1 else None
+        trace = traces.setdefault(id(item), {})
         try:
-            page, finding = pipeline(item.image, item.problem)
+            page, finding = pipeline(item.image, item.problem, trace=trace) if traced else pipeline(
+                item.image, item.problem)
         except Exception as exc:  # one bad page must not stop the run
             return item, None, None, time.monotonic() - start, exc, None
         after = cost() if workers == 1 else None
@@ -148,7 +167,7 @@ def run(items: Iterable[EvalItem], pipeline: Pipeline, cost: Callable[[], float 
                 score.cost_usd = None if spent is None else score.cost_usd + spent
             outcome = score_item(score, item, page, finding)
             if record:
-                record(item, page, finding, outcome)
+                record(item, page, finding, outcome, traces.get(id(item), {}))
             log(f"{item.source}/{item.id}: {outcome}")
     if workers > 1:
         total_after = cost()
@@ -160,7 +179,8 @@ def run(items: Iterable[EvalItem], pipeline: Pipeline, cost: Callable[[], float 
 
 
 def format_scorecard(scores: dict[str, Score]) -> str:
-    cols = ["source", "pages", "caught", "wrong_line", "missed", "false_alarms", "clean_ok", "failures",
+    cols = ["source", "pages", "caught", "wrong_line", "missed", "false_alarms", "clean_ok", "disputed_flagged",
+            "raw_false_alarms", "failures",
             "catch_rate", "false_alarm_rate", "gate_passed", "reading_similarity", "cost_per_page",
             "seconds_per_page"]
     rows = [[str(s.summary()[c]) for c in cols] for s in scores.values()]
@@ -177,10 +197,10 @@ def live_pipeline(read_only: bool = False):
 
     spark = SparkClient.from_settings(Settings.from_env())
 
-    def pipeline(image: bytes, problem: str | None):
+    def pipeline(image: bytes, problem: str | None, trace: dict | None = None):
         if read_only:  # reading-only sources (EDU-CIRCUIT-HW) have no error labels
             return read_page(spark, image), None
-        return check_image(spark, image, problem, hint=False)
+        return check_image(spark, image, problem, hint=False, trace=trace)
 
     return pipeline, lambda: spark.total_cost
 
@@ -195,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--exclude-seed", type=int, help="FERMAT: leave out the pages that --seed N with the same "
                     "--limit would pick (a held-out sample, disjoint from the tuning one)")
+    ap.add_argument("--only", choices=["clean", "error"], help="run only the clean (or error) pages of the "
+                    "sample, e.g. to measure false alarms on a held-out sample for half the cost")
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--save", help="write per-page results (JSONL) here, e.g. .cache/eval/runs/x.jsonl")
     args = ap.parse_args(argv)
@@ -228,13 +250,19 @@ def main(argv: list[str] | None = None) -> int:
             items.extend(itertools.islice(load(src, **kw), args.limit))
         except RuntimeError as exc:
             print(f"skip {src}: {exc}", file=sys.stderr)
+    if args.only:
+        keep = ("none", "disputed") if args.only == "clean" else ("unknown",)
+        items = [i for i in items if i.first_error_step is None or i.first_error_step in keep
+                 or (args.only == "error" and isinstance(i.first_error_step, int))]
+    if args.save:
+        Path(args.save).parent.mkdir(parents=True, exist_ok=True)
     out = open(args.save, "w") if args.save else None  # noqa: SIM115
 
-    def record(item, page, finding, outcome):
+    def record(item, page, finding, outcome, trace):
         if out:
             out.write(json.dumps({"source": item.source, "id": item.id, "label": item.first_error_step,
                                   "outcome": outcome, "page": page.model_dump(),
-                                  "finding": finding.model_dump() if finding else None,
+                                  "finding": finding.model_dump() if finding else None, "trace": trace,
                                   "meta": {k: v for k, v in item.meta.items() if isinstance(v, (str, int, float))}})
                       + "\n")
             out.flush()

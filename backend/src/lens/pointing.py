@@ -111,6 +111,31 @@ def mask_outline(mask: np.ndarray) -> Polygon | None:
     return [(round(float(px / w), 4), round(float(py / h), 4)) for px, py in hull]
 
 
+def step_mask(masks: list, box: tuple[float, float, float, float], min_inside: float = 0.6) -> np.ndarray | None:
+    """The SAM mask that is the step at `box`, trimmed to the step, or None.
+
+    SAM 3 takes a box as an example of what to find, not as "this object": it returns
+    every handwritten line that looks like the one in the box, and its best-scored one
+    can be a neighbour. So the mask kept is the one lying most inside the box (padded by
+    half a line up and down), cut to that padded box; none mostly inside: None (the
+    outline is then the box itself)."""
+    x, y, w, h = box
+    best, best_in = None, 0.0
+    for m in masks:
+        m = np.asarray(m, dtype=bool)
+        if not m.any():
+            continue
+        H, W = m.shape
+        x0, y0 = int(max(0.0, x - 0.02) * W), int(max(0.0, y - 0.5 * h) * H)
+        x1, y1 = int(np.ceil(min(1.0, x + w + 0.02) * W)), int(np.ceil(min(1.0, y + 1.5 * h) * H))
+        keep = np.zeros_like(m)
+        keep[y0:y1, x0:x1] = True
+        inside = float((m & keep).sum()) / float(m.sum())
+        if inside > best_in:
+            best, best_in = m & keep, inside
+    return best if best is not None and best_in >= min_inside and best.any() else None
+
+
 def outline_for_step(step: Step, mask: np.ndarray | None = None) -> Polygon:
     """Prefer the SAM mask; fall back to the reader's bbox."""
     if mask is not None:

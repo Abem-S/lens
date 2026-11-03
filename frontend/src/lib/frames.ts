@@ -1,6 +1,7 @@
 // Browser glue: sample a video into small grayscale frames for change detection,
 // and grab a full-resolution JPEG when a check is due.
 import type { Frame } from "./changeDetect";
+import { SkinTracker } from "./skin";
 
 const SAMPLE_W = 160;
 
@@ -15,6 +16,7 @@ function isSkin(r: number, g: number, b: number): boolean {
 export class FrameSampler {
   private canvas = document.createElement("canvas");
   private ctx = this.canvas.getContext("2d", { willReadFrequently: true })!;
+  private skinTracker = new SkinTracker(); // skin that never moves is the desk, not a hand
 
   sample(video: HTMLVideoElement): Frame | null {
     const vw = video.videoWidth, vh = video.videoHeight;
@@ -25,13 +27,13 @@ export class FrameSampler {
     this.ctx.drawImage(video, 0, 0, w, h);
     const { data } = this.ctx.getImageData(0, 0, w, h);
     const gray = new Uint8Array(w * h);
-    let skin = 0;
+    const skin = new Uint8Array(w * h);
     for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
       const r = data[p], g = data[p + 1], b = data[p + 2];
       gray[i] = (r * 77 + g * 150 + b * 29) >> 8;
-      if (isSkin(r, g, b)) skin++;
+      skin[i] = isSkin(r, g, b) ? 1 : 0;
     }
-    return { width: w, height: h, gray, skin: skin / gray.length };
+    return { width: w, height: h, gray, skin: this.skinTracker.push(skin) };
   }
 }
 

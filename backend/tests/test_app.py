@@ -67,7 +67,7 @@ def test_tutor_socket_runs_a_check_and_speaks_the_hint(monkeypatch):
     from lens.checker import check_page
     from lens.contract import Page, Step
 
-    def fake_check(spark, image, problem, mask_for=None):
+    def fake_check(spark, image, problem, mask_for=None, **live):
         page = Page(problem="Solve 2x + 5 = 11", steps=[Step(id="s1", latex="2x + 5 = 11"),
                                                          Step(id="s2", latex="2x = 16")])
         page, finding = check_page(page)
@@ -102,4 +102,4 @@ def test_access_gate_locks_everything_but_health_until_the_code_is_used():
     r = c.get("/?code=s3cret")
     assert r.status_code == 303 and r.headers["location"] == "/"
     assert c.post("/api/sessions").status_code == 200  # cookie now set
-    assert c.post("/api/sessions").json()["phone_url"].endswith("?code=s3cret")
+    assert "?pair=" in c.post("/api/sessions").json()["phone_url"]  # a pairing token, never the code

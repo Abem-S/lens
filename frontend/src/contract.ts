@@ -27,4 +27,7 @@ export interface Finding {
 export interface CheckResult {
   page: Page;
   finding: Finding | null;
+  /** Screen only (not from the server): how sure the outline's place on the live page is.
+   * "held": faded (covered a moment, or tracking paused); "lost": hidden. Absent: as checked. */
+  outline?: "ok" | "held" | "lost";
 }

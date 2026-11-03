@@ -1,3 +1,4 @@
+import { cameraMessage } from "./errors";
 import { useEffect, useRef, useState } from "react";
 
 export type Facing = "user" | "environment";
@@ -28,6 +29,9 @@ export function useCamera(facing: Facing, enabled = true) {
       .then((s) => {
         if (cancelled) return s.getTracks().forEach((t) => t.stop());
         stream = s;
+        setError(null);
+        for (const t of s.getVideoTracks())
+          t.onended = () => setError("The camera stopped (unplugged or taken by another app). Reload the page to start it again.");
         const v = videoRef.current;
         if (v) {
           v.srcObject = s;
@@ -37,7 +41,7 @@ export function useCamera(facing: Facing, enabled = true) {
           };
         }
       })
-      .catch((e: Error) => setError(e.name === "NotAllowedError" ? "Camera permission was denied." : e.message));
+      .catch((e: Error) => setError(cameraMessage(e)));
     return () => {
       cancelled = true;
       stream?.getTracks().forEach((t) => t.stop());

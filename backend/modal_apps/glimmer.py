@@ -18,6 +18,7 @@ Glimmer's own "Reasoning strength" by a small chat-template patch below.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -60,7 +61,8 @@ _TEMPLATE_NEW = (
 
 
 def _template(model_dir: str) -> str:
-    src = open(os.path.join(model_dir, "chat_template.jinja")).read()
+    with open(os.path.join(model_dir, "chat_template.jinja")) as f:
+        src = f.read()
     if _TEMPLATE_OLD not in src:
         raise RuntimeError("chat template changed upstream; update the reasoning_effort patch")
     path = "/tmp/glimmer_template.jinja"
@@ -114,5 +116,5 @@ def serve() -> None:
         env["VLLM_API_KEY"] = os.environ["GLIMMER_API_KEY"]
     if os.environ.get("GLIMMER_SPECULATIVE", "1") == "1":
         cmd += ["--speculative-config",
-                '{"method": "dflash", "model": "%s", "num_speculative_tokens": 15}' % DRAFT_ID]
+                json.dumps({"method": "dflash", "model": DRAFT_ID, "num_speculative_tokens": 15})]
     subprocess.Popen(cmd, env=env)

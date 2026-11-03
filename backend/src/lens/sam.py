@@ -32,10 +32,10 @@ class SamClient:
         self._cls = modal.Cls.from_name(APP_NAME, "Sam")
         self._obj = self._cls()
 
-    def keep_warm(self, on: bool) -> None:
-        """During a session keep one GPU container up (cold start is ~30-60 s)."""
-        self._obj.update_autoscaler(min_containers=1 if on else 0)
-        log.info("sam keep_warm=%s", on)
+    def ping(self) -> dict:
+        """Start a container if none is up (lens.warm pings this while a student is active;
+        nothing is ever pinned up, so the app scales to zero after its scaledown window)."""
+        return self._obj.ping.remote()
 
     def segment(self, image: bytes, *, text: str | None = None,
                 boxes: list[tuple[float, float, float, float]] | None = None,

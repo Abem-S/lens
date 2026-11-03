@@ -28,8 +28,9 @@ class VoiceClient:
 
         self._obj = modal.Cls.from_name(APP_NAME, "Voice")()
 
-    def keep_warm(self, on: bool) -> None:
-        self._obj.update_autoscaler(min_containers=1 if on else 0)
+    def ping(self) -> dict:
+        """Start a container if none is up (see lens.warm)."""
+        return self._obj.ping.remote()
 
     def transcribe(self, wav: bytes) -> str:
         t = time.monotonic()
@@ -38,10 +39,12 @@ class VoiceClient:
                  out["seconds"], time.monotonic() - t)
         return out["text"]
 
-    def synthesize(self, text: str) -> Iterator[tuple[bytes, int]]:
-        """Yield (pcm16 mono, sample_rate) chunks as Kokoro produces them."""
+    def synthesize(self, text: str, speed: float = 1.0) -> Iterator[tuple[bytes, int]]:
+        """Yield (pcm16 mono, sample_rate) chunks as Kokoro produces them. `speed`: 1 is normal."""
         t = time.monotonic()
-        for i, chunk in enumerate(self._obj.synthesize.remote_gen(text)):
+        gen = self._obj.synthesize.remote_gen(text) if speed == 1.0 else self._obj.synthesize.remote_gen(text,
+                                                                                                         speed=speed)
+        for i, chunk in enumerate(gen):
             if i == 0:
                 log.info("tts first audio %.2fs (gpu %.2fs) for %d chars", time.monotonic() - t, chunk["seconds"],
                          len(text))
